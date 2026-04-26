@@ -1,0 +1,22 @@
+{
+  "name": "yophon-board",
+  "version": "0.1.0",
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "dev:web": "cd frontend && bun run dev",
+    "build": "cd frontend && bun install && bun run build",
+    "start": "bun run src/index.ts",
+    "type-check": "bunx tsc --noEmit && cd frontend && bun run type-check"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1.4.1",
+    "dotenv": "^17.2.3",
+    "elysia": "^1.4.28"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.3"
+  }
+}
