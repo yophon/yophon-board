@@ -209,10 +209,12 @@ export function getDbStats(db: Database): DbStats {
   const now = Math.floor(Date.now() / 1000);
   const sessions = (db.query("SELECT COUNT(*) AS n FROM admin_sessions WHERE expires_at > ?").get(now) as { n: number }).n;
   let size = 0;
-  try {
-    size = Bun.file(DB_PATH).size;
-  } catch {
-    size = 0;
+  for (const path of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+    try {
+      size += Bun.file(path).size || 0;
+    } catch {
+      // file may not exist yet (e.g. WAL only after first write); ignore.
+    }
   }
   return { boards, strokes, admin_sessions: sessions, db_path: DB_PATH, db_size_bytes: size };
 }
