@@ -10,10 +10,12 @@ import {
   deleteOwnStroke,
   ensureBoard,
   getBoard,
+  getDbStats,
   getStrokes,
   initDb,
   listBoards,
   normalizeSlug,
+  updateAdminPassword,
   validateAdminSession,
   verifyAdminPassword,
   type BoardRow,
@@ -23,6 +25,7 @@ import {
 const db = initDb();
 
 const SESSION_COOKIE = "yophon_board_session";
+const CLIENT_ID_COOKIE = "yophon_board_cid";
 const PORT = Number(process.env.PORT || 3020);
 const HOST = process.env.HOST || "127.0.0.1";
 const APP_ORIGIN = process.env.APP_ORIGIN;
@@ -34,6 +37,7 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const INTERNAL_REMOTE_IP_HEADER = "x-yophon-remote-ip";
 const STROKE_MAX_BYTES = 20000;
 const STROKE_MAX_POINTS = 1000;
+const CLIENT_ID_MAX_AGE = 365 * 24 * 60 * 60;
 const DIST_DIR = existsSync("frontend/dist") ? "frontend/dist" : "public";
 
 type WsData = { boardSlug: string };
@@ -44,6 +48,21 @@ const loginAttempts = new Map<string, number[]>();
 function isAuthed(cookie: Record<string, any>): boolean {
   const sid = cookie[SESSION_COOKIE]?.value;
   return typeof sid === "string" && sid.length > 0 && validateAdminSession(db, sid);
+}
+
+function ensureClientId(cookie: Record<string, any>, request: Request): string {
+  const existing = cookie[CLIENT_ID_COOKIE]?.value;
+  if (typeof existing === "string" && /^[a-f0-9-]{16,80}$/.test(existing)) return existing;
+  const next = crypto.randomUUID();
+  cookie[CLIENT_ID_COOKIE].set({
+    value: next,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: shouldUseSecureCookie(request),
+    path: "/",
+    maxAge: CLIENT_ID_MAX_AGE,
+  });
+  return next;
 }
 
 function parseId(value: string): number {
@@ -309,23 +328,69 @@ const app = new Elysia()
     return { ok: true };
   })
   .get("/api/auth/check", ({ cookie }) => ({ authed: isAuthed(cookie) }))
+  .post("/api/auth/password", async ({ body, cookie, set }) => {
+    if (!isAuthed(cookie)) {
+      set.status = 401;
+      return { error: "未授权，请先登录" };
+    }
+    const payload = body as { old_password: string; new_password: string };
+    if (!payload.new_password || payload.new_password.length < 8 || payload.new_password.length > 256) {
+      set.status = 400;
+      return { error: "新密码长度需在 8-256 之间" };
+    }
+    const ok = await updateAdminPassword(db, payload.old_password, payload.new_password);
+    if (!ok) {
+      set.status = 400;
+      return { error: "旧密码错误" };
+    }
+    cookie[SESSION_COOKIE].set({ value: "", maxAge: 0, path: "/" });
+    return { ok: true };
+  }, {
+    body: t.Object({
+      old_password: t.String(),
+      new_password: t.String(),
+    }),
+  })
+  .get("/api/admin/stats", ({ cookie, set }) => {
+    if (!isAuthed(cookie)) {
+      set.status = 401;
+      return { error: "未授权，请先登录" };
+    }
+    const dbStats = getDbStats(db);
+    let wsClients = 0;
+    const wsBoards: Record<string, number> = {};
+    for (const [slug, clients] of boardClients) {
+      wsBoards[slug] = clients.size;
+      wsClients += clients.size;
+    }
+    return {
+      ...dbStats,
+      ws_clients: wsClients,
+      ws_boards: wsBoards,
+      write_attempts_keys: writeAttempts.size,
+      login_attempts_keys: loginAttempts.size,
+      uptime_seconds: Math.floor(process.uptime()),
+    };
+  })
   .get("/api/boards/:slug/strokes", ({ params, query }) => {
     const board = getBoard(db, params.slug);
     if (!board) return [];
-    return getStrokes(db, board.id, parsePage(query.page)).map(toPublicStroke);
+    const sinceRaw = Number(query.since ?? 0);
+    const sinceId = Number.isInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
+    return getStrokes(db, board.id, parsePage(query.page), sinceId).map(toPublicStroke);
   })
-  .post("/api/boards/:slug/strokes", ({ params, body, request }) => {
+  .post("/api/boards/:slug/strokes", ({ params, body, request, cookie }) => {
     const clientKey = getClientKey(request);
     if (isRateLimited(writeAttempts, `stroke:${clientKey}`, PUBLIC_WRITE_LIMIT_MAX, PUBLIC_WRITE_LIMIT_WINDOW_MS)) {
       return tooManyRequests("提交过于频繁，请稍后再试");
     }
 
-    const payload = body as { stroke_data: string; client_id: string; local_id: string; page?: number };
-    const clientId = payload.client_id?.trim();
+    const payload = body as { stroke_data: string; local_id: string; page?: number };
     const localId = payload.local_id?.trim();
-    if (!clientId || clientId.length > 80 || !localId || localId.length > 120) {
+    if (!localId || localId.length > 120) {
       return badRequest("缺少客户端笔画标识");
     }
+    const clientId = ensureClientId(cookie, request);
 
     const page = parsePage(payload.page);
     let normalized: string | Response;
@@ -339,30 +404,27 @@ const app = new Elysia()
     const board = ensureBoard(db, params.slug);
     const row = createStroke(db, board.id, page, clientId, localId, normalized);
     const publicRow = toPublicStroke(row);
-    broadcastBoard(board.slug, { type: "stroke-created", stroke: publicRow, client_id: clientId, local_id: localId, page });
+    broadcastBoard(board.slug, { type: "stroke-created", stroke: publicRow, local_id: localId, page });
     return publicRow;
   }, {
     body: t.Object({
       stroke_data: t.String(),
-      client_id: t.String(),
       local_id: t.String(),
+      client_id: t.Optional(t.String()),
       page: t.Optional(t.Number()),
     }),
   })
-  .delete("/api/boards/:slug/strokes/:id", ({ params, query, body }) => {
+  .delete("/api/boards/:slug/strokes/:id", ({ params, query, request, cookie }) => {
     const board = getBoard(db, params.slug);
     if (!board) return badRequest("白板不存在");
     const page = parsePage(query.page);
-    const clientId = (body as { client_id?: string } | undefined)?.client_id?.trim() || "";
-    if (!clientId) return badRequest("缺少客户端标识");
+    const clientId = ensureClientId(cookie, request);
 
     const id = parseId(params.id);
     const deleted = deleteOwnStroke(db, board.id, id, page, clientId);
     if (!deleted) return badRequest("无法撤销此笔画");
     broadcastBoard(board.slug, { type: "stroke-deleted", id, page });
     return { ok: true };
-  }, {
-    body: t.Object({ client_id: t.String() }),
   })
   .delete("/api/boards/:slug/strokes", ({ params, query, cookie, set }) => {
     if (!isAuthed(cookie)) {
@@ -424,7 +486,10 @@ Bun.serve<WsData>({
       // Writes use HTTP; WebSocket is only for fan-out.
     },
     close(ws) {
-      boardClients.get(ws.data.boardSlug)?.delete(ws);
+      const clients = boardClients.get(ws.data.boardSlug);
+      if (!clients) return;
+      clients.delete(ws);
+      if (clients.size === 0) boardClients.delete(ws.data.boardSlug);
     },
   },
 });

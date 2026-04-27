@@ -109,10 +109,10 @@ export function listBoards(db: Database): BoardRow[] {
   return db.query("SELECT * FROM boards ORDER BY created_at DESC, id DESC").all() as BoardRow[];
 }
 
-export function getStrokes(db: Database, boardId: number, page = 0): StrokeRow[] {
+export function getStrokes(db: Database, boardId: number, page = 0, sinceId = 0): StrokeRow[] {
   return db.query(
-    "SELECT id, board_id, page, client_id, local_id, stroke_data, created_at FROM strokes WHERE board_id = ? AND page = ? ORDER BY id ASC",
-  ).all(boardId, page) as StrokeRow[];
+    "SELECT id, board_id, page, client_id, local_id, stroke_data, created_at FROM strokes WHERE board_id = ? AND page = ? AND id > ? ORDER BY id ASC",
+  ).all(boardId, page, sinceId) as StrokeRow[];
 }
 
 export function createStroke(
@@ -177,4 +177,42 @@ export async function verifyAdminPassword(db: Database, password: string): Promi
   const row = db.query("SELECT value FROM config WHERE key = 'admin_password'").get() as { value: string } | null;
   if (!row) return false;
   return await Bun.password.verify(password, row.value);
+}
+
+export async function updateAdminPassword(
+  db: Database,
+  oldPassword: string,
+  newPassword: string,
+): Promise<boolean> {
+  const ok = await verifyAdminPassword(db, oldPassword);
+  if (!ok) return false;
+  const hashed = Bun.password.hashSync(newPassword, {
+    algorithm: "bcrypt",
+    cost: DEFAULT_BCRYPT_COST,
+  });
+  db.run("INSERT OR REPLACE INTO config (key, value) VALUES ('admin_password', ?)", [hashed]);
+  db.run("DELETE FROM admin_sessions");
+  return true;
+}
+
+export interface DbStats {
+  boards: number;
+  strokes: number;
+  admin_sessions: number;
+  db_path: string;
+  db_size_bytes: number;
+}
+
+export function getDbStats(db: Database): DbStats {
+  const boards = (db.query("SELECT COUNT(*) AS n FROM boards").get() as { n: number }).n;
+  const strokes = (db.query("SELECT COUNT(*) AS n FROM strokes").get() as { n: number }).n;
+  const now = Math.floor(Date.now() / 1000);
+  const sessions = (db.query("SELECT COUNT(*) AS n FROM admin_sessions WHERE expires_at > ?").get(now) as { n: number }).n;
+  let size = 0;
+  try {
+    size = Bun.file(DB_PATH).size;
+  } catch {
+    size = 0;
+  }
+  return { boards, strokes, admin_sessions: sessions, db_path: DB_PATH, db_size_bytes: size };
 }

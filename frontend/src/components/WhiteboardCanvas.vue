@@ -185,7 +185,7 @@ interface StrokeRow {
 type WsState = 'offline' | 'connecting' | 'online'
 type GraffitiWsMessage =
   | { type: 'connected' }
-  | { type: 'stroke-created'; stroke: StrokeRow; client_id?: string; local_id?: string; page?: number }
+  | { type: 'stroke-created'; stroke: StrokeRow; local_id?: string; page?: number }
   | { type: 'stroke-deleted'; id: number; page?: number }
   | { type: 'strokes-cleared'; page?: number }
 
@@ -193,7 +193,6 @@ const canvasRef = ref<HTMLCanvasElement>()
 const miniMapRef = ref<HTMLCanvasElement>()
 const wrapRef = ref<HTMLDivElement>()
 const authStore = useAuthStore()
-const clientId = getClientId()
 
 const offsetX = ref(0)
 const offsetY = ref(0)
@@ -205,6 +204,7 @@ const currentPage = ref(0)
 const currentStroke = ref<StrokeData | null>(null)
 const allStrokes = ref<CanvasStroke[]>([])
 const localUndoStack = ref<CanvasStroke[]>([])
+const lastSyncedId = ref(0)
 
 const currentColor = ref('#202124')
 const currentWidth = ref(3)
@@ -220,12 +220,15 @@ const fullscreenLongPressHandled = ref(false)
 const touchPointers = new Map<number, Point>()
 let ws: WebSocket | null = null
 let reconnectTimer: number | null = null
+let reconnectAttempts = 0
 let frameRequest: number | null = null
 let unmounted = false
 let previousBodyOverflow = ''
 let pinchDistance = 0
 let pinchCenter: Point | null = null
 let pinchActive = false
+const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000]
+const PENDING_STORAGE_KEY = 'yophon_board_pending_v1'
 
 const paletteColors = ['#202124', '#ea4335', '#4285f4', '#34a853']
 
@@ -265,12 +268,51 @@ function selectPreset(i: number) {
 }
 
 function getClientId() {
+  // Server now issues an HttpOnly cookie; this localStorage value is kept only for legacy dedup.
   const key = 'yophon_graffiti_client_id'
-  const existing = localStorage.getItem(key)
-  if (existing) return existing
-  const next = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  localStorage.setItem(key, next)
-  return next
+  try {
+    const existing = localStorage.getItem(key)
+    if (existing) return existing
+    const next = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    localStorage.setItem(key, next)
+    return next
+  } catch {
+    return ''
+  }
+}
+
+function loadPendingStrokes(): CanvasStroke[] {
+  try {
+    const raw = localStorage.getItem(PENDING_STORAGE_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw) as { boardSlug?: string; strokes?: CanvasStroke[] }
+    if (data.boardSlug !== props.boardSlug) return []
+    return (data.strokes || []).map(stroke => ({ ...stroke, pending: false, failed: true, retryTimer: undefined }))
+  } catch {
+    return []
+  }
+}
+
+function savePendingStrokes() {
+  try {
+    const pending = allStrokes.value
+      .filter(stroke => !stroke.id && (stroke.failed || stroke.pending))
+      .map(stroke => ({
+        points: stroke.points,
+        color: stroke.color,
+        width: stroke.width,
+        tool: stroke.tool,
+        opacity: stroke.opacity,
+        blend: stroke.blend,
+        page: stroke.page,
+        localId: stroke.localId,
+        retryCount: stroke.retryCount,
+      }))
+    if (pending.length === 0) localStorage.removeItem(PENDING_STORAGE_KEY)
+    else localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ boardSlug: props.boardSlug, strokes: pending }))
+  } catch {
+    // localStorage might be full or disabled; non-fatal.
+  }
 }
 
 function updatePreset(key: 'color' | 'width', value: string | number) {
@@ -857,12 +899,12 @@ async function saveStroke(stroke: CanvasStroke) {
       method: 'POST',
       body: JSON.stringify({
         stroke_data: JSON.stringify(persistableStroke(stroke)),
-        client_id: clientId,
         local_id: stroke.localId,
         page: stroke.page ?? currentPage.value,
       }),
     })
     applySavedRow(stroke, row)
+    if (row.id > lastSyncedId.value) lastSyncedId.value = row.id
   } catch {
     stroke.failed = true
     stroke.retryCount = (stroke.retryCount || 0) + 1
@@ -870,6 +912,7 @@ async function saveStroke(stroke: CanvasStroke) {
     scheduleStrokeRetry(stroke)
   } finally {
     stroke.pending = false
+    savePendingStrokes()
     renderFrame()
   }
 }
@@ -912,7 +955,6 @@ async function undoLastStroke() {
   try {
     await api(`/api/boards/${props.boardSlug}/strokes/${target.id}?page=${target.page ?? currentPage.value}`, {
       method: 'DELETE',
-      body: JSON.stringify({ client_id: clientId }),
     })
     allStrokes.value = allStrokes.value.filter(stroke => stroke.id !== target.id)
     renderFrame()
@@ -935,14 +977,27 @@ async function clearBoard() {
   }
 }
 
-async function loadExistingStrokes() {
+async function loadExistingStrokes(incremental = false) {
   const page = currentPage.value
+  const since = incremental ? lastSyncedId.value : 0
   try {
-    const rows = await api<StrokeRow[]>(`/api/boards/${props.boardSlug}/strokes?page=${page}`)
+    const url = `/api/boards/${props.boardSlug}/strokes?page=${page}${since > 0 ? `&since=${since}` : ''}`
+    const rows = await api<StrokeRow[]>(url)
     if (page !== currentPage.value) return
     const parsed = rows.map(parseStrokeRow).filter((stroke): stroke is CanvasStroke => !!stroke)
-    const unsaved = allStrokes.value.filter(stroke => !stroke.id && (stroke.pending || stroke.failed) && (stroke.page ?? page) === page)
-    allStrokes.value = [...parsed, ...unsaved]
+
+    if (incremental) {
+      const knownIds = new Set(allStrokes.value.map(stroke => stroke.id).filter((v): v is number => !!v))
+      for (const stroke of parsed) {
+        if (stroke.id && !knownIds.has(stroke.id)) allStrokes.value.push(stroke)
+      }
+    } else {
+      const unsaved = allStrokes.value.filter(stroke => !stroke.id && (stroke.pending || stroke.failed) && (stroke.page ?? page) === page)
+      allStrokes.value = [...parsed, ...unsaved]
+    }
+
+    const maxId = parsed.reduce((m, s) => (s.id && s.id > m ? s.id : m), lastSyncedId.value)
+    lastSyncedId.value = maxId
     renderFrame()
   } catch {
     saveError.value = '加载失败'
@@ -958,6 +1013,7 @@ async function goToPage(page: number) {
   isDrawing.value = false
   isPanning.value = false
   localUndoStack.value = []
+  lastSyncedId.value = 0
   resetView()
   await loadExistingStrokes()
 }
@@ -1019,10 +1075,13 @@ function handleSocketMessage(event: MessageEvent) {
     const parsed = parseStrokeRow(message.stroke)
     if (!parsed) return
 
+    if (parsed.id && parsed.id > lastSyncedId.value) lastSyncedId.value = parsed.id
+
     if (message.local_id) {
       const local = allStrokes.value.find(stroke => stroke.localId === message.local_id)
       if (local) {
         applySavedRow(local, message.stroke)
+        savePendingStrokes()
         renderFrame()
         return
       }
@@ -1055,6 +1114,10 @@ function connectSocket() {
     ws.close()
     ws = null
   }
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
 
   wsState.value = 'connecting'
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -1062,7 +1125,9 @@ function connectSocket() {
 
   ws.onopen = () => {
     wsState.value = 'online'
-    void loadExistingStrokes()
+    reconnectAttempts = 0
+    void loadExistingStrokes(lastSyncedId.value > 0)
+    void flushPendingStrokes()
   }
   ws.onmessage = handleSocketMessage
   ws.onerror = () => {
@@ -1071,12 +1136,26 @@ function connectSocket() {
   ws.onclose = () => {
     if (unmounted) return
     wsState.value = 'offline'
-    reconnectTimer = window.setTimeout(connectSocket, 2500)
+    const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)]
+    reconnectAttempts += 1
+    reconnectTimer = window.setTimeout(connectSocket, delay)
+  }
+}
+
+async function flushPendingStrokes() {
+  const pending = allStrokes.value.filter(stroke => !stroke.id && stroke.failed)
+  for (const stroke of pending) {
+    if (stroke.retryTimer) {
+      window.clearTimeout(stroke.retryTimer)
+      stroke.retryTimer = undefined
+    }
+    await saveStroke(stroke)
   }
 }
 
 onMounted(async () => {
   await nextTick()
+  getClientId()
   readInitialPage()
   resizeCanvas()
   window.addEventListener('resize', resizeCanvas)
@@ -1084,6 +1163,10 @@ onMounted(async () => {
   window.addEventListener('keyup', onKeyUp)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   await authStore.check()
+
+  const restored = loadPendingStrokes().filter(stroke => (stroke.page ?? 0) === currentPage.value)
+  if (restored.length) allStrokes.value.push(...restored)
+
   await loadExistingStrokes()
   connectSocket()
 })
