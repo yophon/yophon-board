@@ -45,6 +45,10 @@ The default production server listens on `http://127.0.0.1:3020`.
 - `/api/boards/:slug/strokes?page=0` lists strokes.
 - `/api/boards/:slug/ws` streams board updates.
 
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries and where to add new features.
+
 ## Environment
 
 | Variable | Default | Purpose |

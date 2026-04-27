@@ -150,44 +150,29 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
+import { ensureLegacyClientId, loadPendingStrokes, savePendingStrokes } from '../whiteboard/pendingStorage'
+import {
+  applySavedRow,
+  createLocalStroke,
+  getCenter,
+  getDistance,
+  parseStrokeRow,
+  persistableStroke,
+} from '../whiteboard/strokeModel'
+import type {
+  CanvasStroke,
+  Point,
+  StrokeData,
+  StrokeRow,
+  WhiteboardWsMessage,
+  WsState,
+} from '../whiteboard/types'
 
 const props = withDefaults(defineProps<{
   boardSlug?: string
 }>(), {
   boardSlug: 'main',
 })
-
-interface Point { x: number; y: number }
-interface StrokeData {
-  points: Point[]
-  color: string
-  width: number
-  tool: 'pen' | 'eraser'
-  opacity?: number
-  blend?: 'normal' | 'multiply'
-}
-interface CanvasStroke extends StrokeData {
-  id?: number
-  localId?: string
-  created_at?: number
-  page?: number
-  pending?: boolean
-  failed?: boolean
-  retryCount?: number
-  retryTimer?: number
-}
-interface StrokeRow {
-  id: number
-  stroke_data: string
-  created_at: number
-  page?: number
-}
-type WsState = 'offline' | 'connecting' | 'online'
-type GraffitiWsMessage =
-  | { type: 'connected' }
-  | { type: 'stroke-created'; stroke: StrokeRow; local_id?: string; page?: number }
-  | { type: 'stroke-deleted'; id: number; page?: number }
-  | { type: 'strokes-cleared'; page?: number }
 
 const canvasRef = ref<HTMLCanvasElement>()
 const miniMapRef = ref<HTMLCanvasElement>()
@@ -228,7 +213,6 @@ let pinchDistance = 0
 let pinchCenter: Point | null = null
 let pinchActive = false
 const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000]
-const PENDING_STORAGE_KEY = 'yophon_board_pending_v1'
 
 const paletteColors = ['#202124', '#ea4335', '#4285f4', '#34a853']
 
@@ -265,54 +249,6 @@ function selectPreset(i: number) {
   currentColor.value = presets.value[i].color
   currentWidth.value = presets.value[i].width
   currentTool.value = 'pen'
-}
-
-function getClientId() {
-  // Server now issues an HttpOnly cookie; this localStorage value is kept only for legacy dedup.
-  const key = 'yophon_graffiti_client_id'
-  try {
-    const existing = localStorage.getItem(key)
-    if (existing) return existing
-    const next = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-    localStorage.setItem(key, next)
-    return next
-  } catch {
-    return ''
-  }
-}
-
-function loadPendingStrokes(): CanvasStroke[] {
-  try {
-    const raw = localStorage.getItem(PENDING_STORAGE_KEY)
-    if (!raw) return []
-    const data = JSON.parse(raw) as { boardSlug?: string; strokes?: CanvasStroke[] }
-    if (data.boardSlug !== props.boardSlug) return []
-    return (data.strokes || []).map(stroke => ({ ...stroke, pending: false, failed: true, retryTimer: undefined }))
-  } catch {
-    return []
-  }
-}
-
-function savePendingStrokes() {
-  try {
-    const pending = allStrokes.value
-      .filter(stroke => !stroke.id && (stroke.failed || stroke.pending))
-      .map(stroke => ({
-        points: stroke.points,
-        color: stroke.color,
-        width: stroke.width,
-        tool: stroke.tool,
-        opacity: stroke.opacity,
-        blend: stroke.blend,
-        page: stroke.page,
-        localId: stroke.localId,
-        retryCount: stroke.retryCount,
-      }))
-    if (pending.length === 0) localStorage.removeItem(PENDING_STORAGE_KEY)
-    else localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ boardSlug: props.boardSlug, strokes: pending }))
-  } catch {
-    // localStorage might be full or disabled; non-fatal.
-  }
 }
 
 function updatePreset(key: 'color' | 'width', value: string | number) {
@@ -352,19 +288,6 @@ function screenToCanvas(sx: number, sy: number): Point {
 
 function getPinchPoints(): Point[] {
   return Array.from(touchPointers.values()).slice(0, 2)
-}
-
-function getDistance(a: Point, b: Point) {
-  const dx = a.x - b.x
-  const dy = a.y - b.y
-  return Math.hypot(dx, dy)
-}
-
-function getCenter(a: Point, b: Point): Point {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-  }
 }
 
 function beginPinchGesture() {
@@ -566,7 +489,7 @@ function onPointerUp(e: PointerEvent) {
   isDrawing.value = false
 
   if (currentStroke.value.points.length >= 2) {
-    const stroke = prepareStroke(currentStroke.value)
+    const stroke = createLocalStroke(currentStroke.value, currentPage.value)
     allStrokes.value.push(stroke)
     localUndoStack.value.push(stroke)
     void saveStroke(stroke)
@@ -798,96 +721,6 @@ function onKeyUp(e: KeyboardEvent) {
   }
 }
 
-function distanceSq(a: Point, b: Point) {
-  const dx = a.x - b.x
-  const dy = a.y - b.y
-  return dx * dx + dy * dy
-}
-
-function simplifyPoints(points: Point[], width: number): Point[] {
-  const minDistance = Math.max(2, width * 0.15)
-  const thresholdSq = minDistance * minDistance
-  const simplified: Point[] = [points[0]]
-
-  for (let i = 1; i < points.length - 1; i++) {
-    const prev = simplified[simplified.length - 1]
-    if (distanceSq(prev, points[i]) >= thresholdSq) {
-      simplified.push(points[i])
-    }
-  }
-  simplified.push(points[points.length - 1])
-
-  if (simplified.length <= 800) return simplified
-
-  const sampled: Point[] = [simplified[0]]
-  const step = (simplified.length - 2) / 798
-  for (let i = 1; i < 799; i++) {
-    sampled.push(simplified[Math.round(i * step)])
-  }
-  sampled.push(simplified[simplified.length - 1])
-  return sampled
-}
-
-function prepareStroke(stroke: StrokeData): CanvasStroke {
-  return {
-    points: simplifyPoints(stroke.points, stroke.width),
-    color: stroke.color,
-    width: stroke.width,
-    tool: stroke.tool,
-    opacity: stroke.opacity ?? 1,
-    blend: stroke.blend ?? 'normal',
-    page: currentPage.value,
-    localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  }
-}
-
-function persistableStroke(stroke: StrokeData): StrokeData {
-  return {
-    points: stroke.points,
-    color: stroke.color,
-    width: stroke.width,
-    tool: stroke.tool,
-    opacity: stroke.opacity ?? 1,
-    blend: stroke.blend ?? 'normal',
-  }
-}
-
-function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
-  try {
-    const stroke = JSON.parse(row.stroke_data) as StrokeData
-    if (!Array.isArray(stroke.points) || stroke.points.length < 2) return null
-    if (stroke.tool !== 'pen' && stroke.tool !== 'eraser') return null
-    return {
-      id: row.id,
-      created_at: row.created_at,
-      points: stroke.points
-        .map(point => ({ x: Number(point.x), y: Number(point.y) }))
-        .filter(point => Number.isFinite(point.x) && Number.isFinite(point.y)),
-      color: typeof stroke.color === 'string' ? stroke.color : '#202124',
-      width: Number.isFinite(Number(stroke.width)) ? Number(stroke.width) : 3,
-      tool: stroke.tool,
-      opacity: Number.isFinite(Number(stroke.opacity)) ? Number(stroke.opacity) : 1,
-      blend: stroke.blend === 'multiply' ? 'multiply' : 'normal',
-      page: row.page ?? 0,
-    }
-  } catch {
-    return null
-  }
-}
-
-function applySavedRow(stroke: CanvasStroke, row: StrokeRow) {
-  stroke.id = row.id
-  stroke.created_at = row.created_at
-  stroke.page = row.page ?? stroke.page
-  stroke.pending = false
-  stroke.failed = false
-  stroke.retryCount = 0
-  if (stroke.retryTimer) {
-    window.clearTimeout(stroke.retryTimer)
-    stroke.retryTimer = undefined
-  }
-}
-
 async function saveStroke(stroke: CanvasStroke) {
   if (stroke.id || stroke.pending) return
   stroke.pending = true
@@ -912,7 +745,7 @@ async function saveStroke(stroke: CanvasStroke) {
     scheduleStrokeRetry(stroke)
   } finally {
     stroke.pending = false
-    savePendingStrokes()
+    savePendingStrokes(props.boardSlug, allStrokes.value)
     renderFrame()
   }
 }
@@ -1063,7 +896,7 @@ function exportPng() {
 }
 
 function handleSocketMessage(event: MessageEvent) {
-  let message: GraffitiWsMessage
+  let message: WhiteboardWsMessage
   try {
     message = JSON.parse(String(event.data))
   } catch {
@@ -1081,7 +914,7 @@ function handleSocketMessage(event: MessageEvent) {
       const local = allStrokes.value.find(stroke => stroke.localId === message.local_id)
       if (local) {
         applySavedRow(local, message.stroke)
-        savePendingStrokes()
+        savePendingStrokes(props.boardSlug, allStrokes.value)
         renderFrame()
         return
       }
@@ -1155,7 +988,7 @@ async function flushPendingStrokes() {
 
 onMounted(async () => {
   await nextTick()
-  getClientId()
+  ensureLegacyClientId()
   readInitialPage()
   resizeCanvas()
   window.addEventListener('resize', resizeCanvas)
@@ -1164,7 +997,7 @@ onMounted(async () => {
   document.addEventListener('fullscreenchange', onFullscreenChange)
   await authStore.check()
 
-  const restored = loadPendingStrokes().filter(stroke => (stroke.page ?? 0) === currentPage.value)
+  const restored = loadPendingStrokes(props.boardSlug).filter(stroke => (stroke.page ?? 0) === currentPage.value)
   if (restored.length) allStrokes.value.push(...restored)
 
   await loadExistingStrokes()

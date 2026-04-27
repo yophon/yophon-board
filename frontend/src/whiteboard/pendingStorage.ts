@@ -1,0 +1,50 @@
+import type { CanvasStroke } from './types'
+
+const PENDING_STORAGE_KEY = 'yophon_board_pending_v1'
+const LEGACY_CLIENT_ID_KEY = 'yophon_graffiti_client_id'
+
+export function ensureLegacyClientId() {
+  try {
+    const existing = localStorage.getItem(LEGACY_CLIENT_ID_KEY)
+    if (existing) return existing
+    const next = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    localStorage.setItem(LEGACY_CLIENT_ID_KEY, next)
+    return next
+  } catch {
+    return ''
+  }
+}
+
+export function loadPendingStrokes(boardSlug: string): CanvasStroke[] {
+  try {
+    const raw = localStorage.getItem(PENDING_STORAGE_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw) as { boardSlug?: string; strokes?: CanvasStroke[] }
+    if (data.boardSlug !== boardSlug) return []
+    return (data.strokes || []).map(stroke => ({ ...stroke, pending: false, failed: true, retryTimer: undefined }))
+  } catch {
+    return []
+  }
+}
+
+export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
+  try {
+    const pending = strokes
+      .filter(stroke => !stroke.id && (stroke.failed || stroke.pending))
+      .map(stroke => ({
+        points: stroke.points,
+        color: stroke.color,
+        width: stroke.width,
+        tool: stroke.tool,
+        opacity: stroke.opacity,
+        blend: stroke.blend,
+        page: stroke.page,
+        localId: stroke.localId,
+        retryCount: stroke.retryCount,
+      }))
+    if (pending.length === 0) localStorage.removeItem(PENDING_STORAGE_KEY)
+    else localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ boardSlug, strokes: pending }))
+  } catch {
+    // localStorage might be full or disabled; non-fatal.
+  }
+}
