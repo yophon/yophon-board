@@ -53,6 +53,72 @@ function isAuthed(cookie: CookieJar): boolean {
   return typeof sid === "string" && sid.length > 0 && validateAdminSession(db, sid);
 }
 
+function listProjects() {
+  return listBoards(db).map(toPublicBoard);
+}
+
+function getOrCreateProject(slug: string) {
+  return toPublicBoard(ensureBoard(db, slug));
+}
+
+function createProject(payload: { slug: string; title?: string }) {
+  return toPublicBoard(ensureBoard(db, payload.slug, payload.title));
+}
+
+function listProjectStrokes(slug: string, query: Record<string, unknown>) {
+  const board = getBoard(db, slug);
+  if (!board) return [];
+  const sinceRaw = Number(query.since ?? 0);
+  const sinceId = Number.isInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
+  return getStrokes(db, board.id, parsePage(query.page), sinceId).map(toPublicStroke);
+}
+
+function saveProjectStroke(slug: string, body: unknown, request: Request, cookie: CookieJar) {
+  const clientKey = getClientKey(request);
+  if (writeLimiter.hit(`stroke:${clientKey}`)) {
+    return tooManyRequests("提交过于频繁，请稍后再试");
+  }
+
+  const payload = body as { stroke_data: string; local_id: string; page?: number };
+  const localId = payload.local_id?.trim();
+  if (!localId || localId.length > 120) {
+    return badRequest("缺少客户端笔画标识");
+  }
+  const clientId = ensureClientId(cookie, request);
+
+  const page = parsePage(payload.page);
+  const normalized = normalizeStrokeData(payload.stroke_data);
+  if (!normalized.ok) return badRequest(normalized.message);
+
+  const board = ensureBoard(db, slug);
+  const row = createStroke(db, board.id, page, clientId, localId, normalized.value);
+  const publicRow = toPublicStroke(row);
+  boardHub.broadcast(board.slug, { type: "stroke-created", stroke: publicRow, local_id: localId, page });
+  return publicRow;
+}
+
+function deleteOwnProjectStroke(slug: string, strokeId: string, query: Record<string, unknown>, request: Request, cookie: CookieJar) {
+  const board = getBoard(db, slug);
+  if (!board) return badRequest("白板不存在");
+  const page = parsePage(query.page);
+  const clientId = ensureClientId(cookie, request);
+
+  const id = parseId(strokeId);
+  const deleted = deleteOwnStroke(db, board.id, id, page, clientId);
+  if (!deleted) return badRequest("无法撤销此笔画");
+  boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
+  return { ok: true };
+}
+
+function clearProjectPage(slug: string, query: Record<string, unknown>) {
+  const board = getBoard(db, slug);
+  if (!board) return badRequest("白板不存在");
+  const page = parsePage(query.page);
+  clearBoardPage(db, board.id, page);
+  boardHub.broadcast(board.slug, { type: "strokes-cleared", page });
+  return { ok: true };
+}
+
 setInterval(() => {
   writeLimiter.cleanup();
   loginLimiter.cleanup();
@@ -82,18 +148,53 @@ const app = new Elysia()
     credentials: true,
   }))
   .get("/api/health", () => ({ ok: true }))
-  .get("/api/boards", () => listBoards(db).map(toPublicBoard))
+  .get("/api/projects", () => listProjects())
+  .get("/api/projects/:slug", ({ params }) => getOrCreateProject(params.slug))
+  .get("/api/projects/:slug/strokes", ({ params, query }) => listProjectStrokes(params.slug, query))
+  .post("/api/projects/:slug/strokes", ({ params, body, request, cookie }) => {
+    return saveProjectStroke(params.slug, body, request, cookie);
+  }, {
+    body: t.Object({
+      stroke_data: t.String(),
+      local_id: t.String(),
+      client_id: t.Optional(t.String()),
+      page: t.Optional(t.Number()),
+    }),
+  })
+  .delete("/api/projects/:slug/strokes/:id", ({ params, query, request, cookie }) => {
+    return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
+  })
+  .delete("/api/projects/:slug/strokes", ({ params, query, cookie, set }) => {
+    if (!isAuthed(cookie)) {
+      set.status = 401;
+      return { error: "未授权，请先登录" };
+    }
+    return clearProjectPage(params.slug, query);
+  })
+  .post("/api/projects", ({ body, cookie, set }) => {
+    if (!isAuthed(cookie)) {
+      set.status = 401;
+      return { error: "未授权，请先登录" };
+    }
+    const payload = body as { slug: string; title?: string };
+    if (getBoard(db, payload.slug)) return badRequest("项目标识已存在");
+    return createProject(payload);
+  }, {
+    body: t.Object({
+      slug: t.String(),
+      title: t.Optional(t.String()),
+    }),
+  })
+  .get("/api/boards", () => listProjects())
   .get("/api/boards/:slug", ({ params }) => {
-    const board = ensureBoard(db, params.slug);
-    return toPublicBoard(board);
+    return getOrCreateProject(params.slug);
   })
   .post("/api/boards", ({ body, cookie, set }) => {
     if (!isAuthed(cookie)) {
       set.status = 401;
       return { error: "未授权，请先登录" };
     }
-    const payload = body as { slug: string; title?: string };
-    return toPublicBoard(ensureBoard(db, payload.slug, payload.title));
+    return createProject(body as { slug: string; title?: string });
   }, {
     body: t.Object({
       slug: t.String(),
@@ -179,34 +280,10 @@ const app = new Elysia()
     };
   })
   .get("/api/boards/:slug/strokes", ({ params, query }) => {
-    const board = getBoard(db, params.slug);
-    if (!board) return [];
-    const sinceRaw = Number(query.since ?? 0);
-    const sinceId = Number.isInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
-    return getStrokes(db, board.id, parsePage(query.page), sinceId).map(toPublicStroke);
+    return listProjectStrokes(params.slug, query);
   })
   .post("/api/boards/:slug/strokes", ({ params, body, request, cookie }) => {
-    const clientKey = getClientKey(request);
-    if (writeLimiter.hit(`stroke:${clientKey}`)) {
-      return tooManyRequests("提交过于频繁，请稍后再试");
-    }
-
-    const payload = body as { stroke_data: string; local_id: string; page?: number };
-    const localId = payload.local_id?.trim();
-    if (!localId || localId.length > 120) {
-      return badRequest("缺少客户端笔画标识");
-    }
-    const clientId = ensureClientId(cookie, request);
-
-    const page = parsePage(payload.page);
-    const normalized = normalizeStrokeData(payload.stroke_data);
-    if (!normalized.ok) return badRequest(normalized.message);
-
-    const board = ensureBoard(db, params.slug);
-    const row = createStroke(db, board.id, page, clientId, localId, normalized.value);
-    const publicRow = toPublicStroke(row);
-    boardHub.broadcast(board.slug, { type: "stroke-created", stroke: publicRow, local_id: localId, page });
-    return publicRow;
+    return saveProjectStroke(params.slug, body, request, cookie);
   }, {
     body: t.Object({
       stroke_data: t.String(),
@@ -216,28 +293,14 @@ const app = new Elysia()
     }),
   })
   .delete("/api/boards/:slug/strokes/:id", ({ params, query, request, cookie }) => {
-    const board = getBoard(db, params.slug);
-    if (!board) return badRequest("白板不存在");
-    const page = parsePage(query.page);
-    const clientId = ensureClientId(cookie, request);
-
-    const id = parseId(params.id);
-    const deleted = deleteOwnStroke(db, board.id, id, page, clientId);
-    if (!deleted) return badRequest("无法撤销此笔画");
-    boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
-    return { ok: true };
+    return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
   })
   .delete("/api/boards/:slug/strokes", ({ params, query, cookie, set }) => {
     if (!isAuthed(cookie)) {
       set.status = 401;
       return { error: "未授权，请先登录" };
     }
-    const board = getBoard(db, params.slug);
-    if (!board) return badRequest("白板不存在");
-    const page = parsePage(query.page);
-    clearBoardPage(db, board.id, page);
-    boardHub.broadcast(board.slug, { type: "strokes-cleared", page });
-    return { ok: true };
+    return clearProjectPage(params.slug, query);
   });
 
 Bun.serve<BoardWsData>({
@@ -250,7 +313,7 @@ Bun.serve<BoardWsData>({
 
     const request = new Request(req, { headers });
     const url = new URL(request.url);
-    const wsMatch = url.pathname.match(/^\/api\/boards\/([^/]+)\/ws$/);
+    const wsMatch = url.pathname.match(/^\/api\/(?:projects|boards)\/([^/]+)\/ws$/);
     if (wsMatch) {
       const boardSlug = normalizeSlug(decodeURIComponent(wsMatch[1]));
       ensureBoard(db, boardSlug);

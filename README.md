@@ -4,12 +4,13 @@ Standalone realtime whiteboard extracted from `yophon-blog`.
 
 ## Features
 
+- Multiple projects, each with its own multi-page whiteboard
 - Infinite-ish pan and zoom canvas
 - Pen, eraser, undo, minimap, page navigation
 - HTTP writes with WebSocket fan-out
 - SQLite persistence
 - Idempotent stroke saves via `(board_id, client_id, local_id)`
-- Admin login for clearing a board page
+- Admin login for creating projects and clearing a project page
 
 ## Run
 
@@ -40,10 +41,13 @@ The default production server listens on `http://127.0.0.1:3020`.
 
 ## Routes
 
-- `/` opens the default board.
-- `/b/:slug` opens or creates a named public board.
-- `/api/boards/:slug/strokes?page=0` lists strokes.
-- `/api/boards/:slug/ws` streams board updates.
+- `/` opens the default project.
+- `/p/:slug` opens or creates a named public project.
+- `/b/:slug` is kept as a legacy project route.
+- `/api/projects` lists projects.
+- `/api/projects/:slug/strokes?page=0` lists strokes.
+- `/api/projects/:slug/ws` streams project updates.
+- `/api/boards/*` remains available as a compatibility API.
 
 ## Architecture
 

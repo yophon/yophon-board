@@ -728,7 +728,7 @@ async function saveStroke(stroke: CanvasStroke) {
   saveError.value = ''
 
   try {
-    const row = await api<StrokeRow>(`/api/boards/${props.boardSlug}/strokes`, {
+    const row = await api<StrokeRow>(`/api/projects/${props.boardSlug}/strokes`, {
       method: 'POST',
       body: JSON.stringify({
         stroke_data: JSON.stringify(persistableStroke(stroke)),
@@ -786,7 +786,7 @@ async function undoLastStroke() {
   }
 
   try {
-    await api(`/api/boards/${props.boardSlug}/strokes/${target.id}?page=${target.page ?? currentPage.value}`, {
+    await api(`/api/projects/${props.boardSlug}/strokes/${target.id}?page=${target.page ?? currentPage.value}`, {
       method: 'DELETE',
     })
     allStrokes.value = allStrokes.value.filter(stroke => stroke.id !== target.id)
@@ -800,7 +800,7 @@ async function clearBoard() {
   if (!authStore.authed) return
   if (!window.confirm(`确定清空第 ${currentPage.value} 页？`)) return
   try {
-    await api(`/api/boards/${props.boardSlug}/strokes?page=${currentPage.value}`, { method: 'DELETE' })
+    await api(`/api/projects/${props.boardSlug}/strokes?page=${currentPage.value}`, { method: 'DELETE' })
     allStrokes.value = allStrokes.value.filter(stroke => (stroke.pending || stroke.failed) && (stroke.page ?? currentPage.value) === currentPage.value)
     localUndoStack.value = []
     saveError.value = ''
@@ -814,7 +814,7 @@ async function loadExistingStrokes(incremental = false) {
   const page = currentPage.value
   const since = incremental ? lastSyncedId.value : 0
   try {
-    const url = `/api/boards/${props.boardSlug}/strokes?page=${page}${since > 0 ? `&since=${since}` : ''}`
+    const url = `/api/projects/${props.boardSlug}/strokes?page=${page}${since > 0 ? `&since=${since}` : ''}`
     const rows = await api<StrokeRow[]>(url)
     if (page !== currentPage.value) return
     const parsed = rows.map(parseStrokeRow).filter((stroke): stroke is CanvasStroke => !!stroke)
@@ -954,7 +954,7 @@ function connectSocket() {
 
   wsState.value = 'connecting'
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(`${protocol}//${window.location.host}/api/boards/${props.boardSlug}/ws`)
+  ws = new WebSocket(`${protocol}//${window.location.host}/api/projects/${props.boardSlug}/ws`)
 
   ws.onopen = () => {
     wsState.value = 'online'
