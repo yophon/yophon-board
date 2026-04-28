@@ -90,6 +90,9 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       rotation: normalizeRotation(stroke.rotation),
       fontSize: Math.round(fontSize * 10) / 10,
       color,
+      align: normalizeTextAlign(stroke.align),
+      bold: stroke.bold === true,
+      italic: stroke.italic === true,
     });
     if (normalizedText.length > STROKE_MAX_BYTES) return { ok: false, message: "涂鸦数据过大" };
     return { ok: true, value: normalizedText };
@@ -140,4 +143,8 @@ function normalizeRotation(value: unknown): number {
   if (!Number.isFinite(rotation)) return 0;
   const normalized = ((rotation % 360) + 360) % 360;
   return Math.round(normalized * 100) / 100;
+}
+
+function normalizeTextAlign(value: unknown): "left" | "center" | "right" {
+  return value === "center" || value === "right" ? value : "left";
 }

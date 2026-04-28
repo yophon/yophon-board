@@ -6,8 +6,9 @@ Standalone realtime whiteboard extracted from `yophon-blog`.
 
 - Multiple projects, each with its own multi-page whiteboard
 - Infinite-ish pan and zoom canvas
-- Pen, eraser, undo, minimap, page navigation
+- Pen, eraser mode switcher, undo, minimap, page navigation
 - Image paste, drag-and-drop, file picker insertion, and hand-mode transforms for images and strokes
+- Inline text insertion at the next canvas click, plus editable font size, color, bold, italic, and alignment
 - HTTP writes with WebSocket fan-out
 - SQLite persistence
 - Idempotent stroke saves via `(board_id, client_id, local_id)`
@@ -50,6 +51,16 @@ The default production server listens on `http://127.0.0.1:3020`.
 - `/api/projects/:slug/assets` uploads image assets.
 - `/api/projects/:slug/ws` streams project updates.
 - `/api/boards/*` remains available as a compatibility API.
+
+## Whiteboard Elements
+
+All whiteboard content is stored through the stroke API as compact JSON:
+
+- Drawing strokes: point arrays with pen or eraser metadata.
+- Image elements: uploaded asset URL, bounds, rotation, and MIME metadata.
+- Text elements: text content, bounds, rotation, font size, color, bold/italic flags, and alignment.
+
+The hand tool can select drawings, images, and text. Selected elements can be moved, resized, rotated, and box-selected.
 
 ## Architecture
 

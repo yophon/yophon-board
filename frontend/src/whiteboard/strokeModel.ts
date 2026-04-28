@@ -1,17 +1,4 @@
-import type { CanvasStroke, Point, StrokeData, StrokeRow } from './types'
-
-export function getDistance(a: Point, b: Point) {
-  const dx = a.x - b.x
-  const dy = a.y - b.y
-  return Math.hypot(dx, dy)
-}
-
-export function getCenter(a: Point, b: Point): Point {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-  }
-}
+import type { CanvasStroke, Point, StrokeData, StrokeRow, TextElementData } from './types'
 
 export function createLocalStroke(stroke: StrokeData, page: number): CanvasStroke {
   if (stroke.type === 'image') {
@@ -40,6 +27,9 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
       color: stroke.color,
+      align: stroke.align ?? 'left',
+      bold: stroke.bold ?? false,
+      italic: stroke.italic ?? false,
       page,
       localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     }
@@ -82,6 +72,9 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
       color: stroke.color,
+      align: stroke.align ?? 'left',
+      bold: stroke.bold ?? false,
+      italic: stroke.italic ?? false,
     }
   }
 
@@ -117,6 +110,7 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
     }
 
     if (stroke.type === 'text') {
+      const align: TextElementData['align'] = stroke.align === 'center' || stroke.align === 'right' ? stroke.align : 'left'
       const text = {
         id: row.id,
         created_at: row.created_at,
@@ -129,6 +123,9 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
         rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
         fontSize: Number.isFinite(Number(stroke.fontSize)) ? Number(stroke.fontSize) : 28,
         color: typeof stroke.color === 'string' ? stroke.color : '#202124',
+        align,
+        bold: stroke.bold === true,
+        italic: stroke.italic === true,
         page: row.page ?? 0,
       }
       if (!text.text || !Number.isFinite(text.x) || !Number.isFinite(text.y) || !Number.isFinite(text.width) || !Number.isFinite(text.height)) return null

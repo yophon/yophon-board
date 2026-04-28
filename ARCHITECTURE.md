@@ -31,6 +31,11 @@ The current realtime model is single-process. If the app moves to multiple insta
 - `frontend/src/whiteboard/types.ts`: shared whiteboard domain types.
 - `frontend/src/whiteboard/strokeModel.ts`: stroke parsing, simplification, serialization, and saved-row application.
 - `frontend/src/whiteboard/pendingStorage.ts`: localStorage-backed unsaved stroke recovery.
+- `frontend/src/whiteboard/renderer.ts`: canvas rendering for drawing strokes, image elements, and text elements.
+- `frontend/src/whiteboard/geometry.ts`: pure point, segment, rotation, and angle helpers.
+- `frontend/src/whiteboard/selection.ts`: element keys, hit-testing, selection bounds, box selection, and transform math.
+- `frontend/src/whiteboard/eraser.ts`: pure eraser hit-testing and vector cut logic.
+- `frontend/src/whiteboard/textLayout.ts`: text font constants, wrapping, measurement, and style normalization helpers.
 - `frontend/src/composables/useApi.ts`: JSON API wrapper.
 - `frontend/src/stores/auth.ts`: admin auth state.
 
@@ -40,10 +45,11 @@ Add new frontend features by choosing the smallest stable layer:
 - New imported assets or element transforms: keep file storage in `assets.ts`; persist only small element metadata and transformed stroke data through the existing drawing save path.
 - New offline behavior: extend `pendingStorage.ts`.
 - New project/page metadata: keep API calls near the component first; promote to a composable once more than one view needs it.
-- New rendering feature such as layers, selections, or imported assets: introduce a whiteboard module before adding more state to `WhiteboardCanvas.vue`.
+- New rendering feature such as layers, selections, or imported assets: start in `renderer.ts` or a sibling whiteboard module before adding more state to `WhiteboardCanvas.vue`.
+- New text behavior: keep canvas drawing and measurement in `textLayout.ts`/`renderer.ts`; keep only editor state and DOM focus handling in `WhiteboardCanvas.vue`.
 
 ## Current Tradeoffs
 
 - There is no test suite yet; type checking and production build are the current guardrails.
-- The frontend renderer is still inside `WhiteboardCanvas.vue` because it is tightly coupled to DOM canvas refs and pointer state. Split it next if rendering features grow.
+- `WhiteboardCanvas.vue` still owns pointer state, editor focus state, persistence calls, and command wiring. Rendering, text layout, geometry, eraser internals, and selection/transform math have been split into whiteboard modules.
 - Project reads still create missing records for legacy shared links. If project permissions are added, make project creation an explicit admin action before adding private visibility rules.

@@ -34,6 +34,9 @@ export interface TextElementData {
   rotation?: number
   fontSize: number
   color: string
+  align?: 'left' | 'center' | 'right'
+  bold?: boolean
+  italic?: boolean
 }
 
 export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData

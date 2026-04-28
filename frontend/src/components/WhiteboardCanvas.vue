@@ -22,12 +22,46 @@
       :style="textEditorStyle"
       :value="textEditor.text"
       @input="onTextEditorInput"
-      @blur="commitTextEditor"
+      @blur="onTextEditorBlur"
       @keydown.stop="onTextEditorKeyDown"
       @pointerdown.stop
       @pointermove.stop
       @pointerup.stop
     ></textarea>
+    <div
+      v-if="textEditor"
+      ref="textToolbarRef"
+      class="wb-text-toolbar"
+      :style="textToolbarStyle"
+      @focusout="onTextToolbarFocusOut"
+      @pointerdown.stop="startTextToolbarInteraction"
+      @pointermove.stop
+      @pointerup.stop
+    >
+      <label class="wb-text-color" title="文本颜色">
+        <input type="color" :value="textEditor.color" @input="updateTextEditorColor(($event.target as HTMLInputElement).value)" />
+      </label>
+      <input
+        class="wb-text-size"
+        type="number"
+        min="8"
+        max="160"
+        :value="Math.round(textEditor.fontSize)"
+        @input="updateTextEditorFontSize(Number(($event.target as HTMLInputElement).value))"
+        title="字号"
+      />
+      <button class="wb-text-style-btn" :class="{ active: textEditor.bold }" @click="toggleTextEditorStyle('bold')" title="粗体">B</button>
+      <button class="wb-text-style-btn wb-text-italic" :class="{ active: textEditor.italic }" @click="toggleTextEditorStyle('italic')" title="斜体">I</button>
+      <button class="wb-text-style-btn" :class="{ active: textEditor.align === 'left' }" @click="setTextEditorAlign('left')" title="左对齐">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16"/><path d="M4 12h11"/><path d="M4 18h16"/></svg>
+      </button>
+      <button class="wb-text-style-btn" :class="{ active: textEditor.align === 'center' }" @click="setTextEditorAlign('center')" title="居中">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16"/><path d="M7 12h10"/><path d="M4 18h16"/></svg>
+      </button>
+      <button class="wb-text-style-btn" :class="{ active: textEditor.align === 'right' }" @click="setTextEditorAlign('right')" title="右对齐">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16"/><path d="M9 12h11"/><path d="M4 18h16"/></svg>
+      </button>
+    </div>
     <canvas
       ref="miniMapRef"
       class="wb-minimap"
@@ -184,20 +218,54 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../composables/useApi'
 import { useAuthStore } from '../stores/auth'
+import { cutStrokeByEraser, strokeIntersectsEraser } from '../whiteboard/eraser'
+import {
+  degreesToRadians,
+  getCenter,
+  getDistance,
+} from '../whiteboard/geometry'
 import { ensureLegacyClientId, loadPendingStrokes, savePendingStrokes } from '../whiteboard/pendingStorage'
+import { drawStrokes } from '../whiteboard/renderer'
+import {
+  applyElementTransform,
+  cloneElement,
+  elementIntersectsBox,
+  elementKey,
+  getElementGeometry,
+  getElementHandlePoints,
+  getElementWorldCorners,
+  getHandleSize,
+  getInteractiveGeometry,
+  getSelectionGeometry,
+  hitTestElements as hitTestSelectionElements,
+  isDrawingStroke,
+  isRectElement,
+  type DrawingStroke,
+  type ElementGeometry,
+  type ElementTransformState,
+  type RectElementStroke,
+  type TextStroke,
+  type TransformMode,
+} from '../whiteboard/selection'
 import {
   applySavedRow,
   createLocalStroke,
-  getCenter,
-  getDistance,
   parseStrokeRow,
   persistableStroke,
 } from '../whiteboard/strokeModel'
+import {
+  DEFAULT_TEXT_FONT_SIZE,
+  DEFAULT_TEXT_WIDTH,
+  TEXT_FONT_FAMILY,
+  clampTextFontSize,
+  measureTextBox,
+} from '../whiteboard/textLayout'
 import type {
   CanvasStroke,
   DrawingStrokeData,
   Point,
   StrokeData,
+  TextElementData,
   StrokeRow,
   UploadedImageAsset,
   WhiteboardWsMessage,
@@ -214,6 +282,7 @@ const canvasRef = ref<HTMLCanvasElement>()
 const miniMapRef = ref<HTMLCanvasElement>()
 const fileInputRef = ref<HTMLInputElement>()
 const textEditorRef = ref<HTMLTextAreaElement>()
+const textToolbarRef = ref<HTMLDivElement>()
 const wrapRef = ref<HTMLDivElement>()
 const authStore = useAuthStore()
 
@@ -244,6 +313,7 @@ const fullscreenLongPressHandled = ref(false)
 const touchPointers = new Map<number, Point>()
 let ws: WebSocket | null = null
 let reconnectTimer: number | null = null
+let textToolbarInteraction = false
 let reconnectAttempts = 0
 let frameRequest: number | null = null
 let unmounted = false
@@ -271,31 +341,8 @@ const eraserWidth = ref(20)
 const eraserMode = ref<EraserMode>('mask')
 const eraserMenuOpen = ref(false)
 
-type ImageStroke = Extract<CanvasStroke, { type: 'image' }>
-type TextStroke = Extract<CanvasStroke, { type: 'text' }>
-type RectElementStroke = ImageStroke | TextStroke
-type DrawingStroke = Extract<CanvasStroke, { points: Point[] }>
 type WhiteboardTool = 'pen' | 'eraser' | 'drag' | 'select' | 'text'
 type EraserMode = 'mask' | 'delete' | 'cut'
-type TransformMode = 'move' | 'resize-n' | 'resize-ne' | 'resize-e' | 'resize-se' | 'resize-s' | 'resize-sw' | 'resize-w' | 'resize-nw' | 'rotate'
-const TEXT_FONT_FAMILY = '"PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif'
-const DEFAULT_TEXT_FONT_SIZE = 28
-const DEFAULT_TEXT_WIDTH = 280
-
-interface ElementGeometry {
-  center: Point
-  width: number
-  height: number
-  rotation: number
-}
-
-interface ElementTransformState {
-  mode: TransformMode
-  startPointer: Point
-  startElements: CanvasStroke[]
-  startGeometry: ElementGeometry
-  startAngle: number
-}
 
 interface TextEditorState {
   mode: 'new' | 'edit'
@@ -308,6 +355,9 @@ interface TextEditorState {
   rotation: number
   fontSize: number
   color: string
+  align: NonNullable<TextElementData['align']>
+  bold: boolean
+  italic: boolean
 }
 
 const selectedElementKeys = ref<string[]>([])
@@ -338,7 +388,19 @@ const textEditorStyle = computed(() => {
     height: `${editor.height * scale.value}px`,
     fontSize: `${editor.fontSize * scale.value}px`,
     color: editor.color,
+    fontFamily: TEXT_FONT_FAMILY,
+    fontWeight: editor.bold ? '700' : '400',
+    fontStyle: editor.italic ? 'italic' : 'normal',
+    textAlign: editor.align,
     transform: `rotate(${editor.rotation}deg)`,
+  }
+})
+const textToolbarStyle = computed(() => {
+  const editor = textEditor.value
+  if (!editor) return {}
+  return {
+    left: `${offsetX.value + editor.x * scale.value}px`,
+    top: `${Math.max(8, offsetY.value + editor.y * scale.value - 42)}px`,
   }
 })
 const wsTitle = computed(() => {
@@ -396,14 +458,6 @@ function clearSelection() {
   selectionBoxStart.value = null
   selectionBoxEnd.value = null
   elementTransform = null
-}
-
-function isDrawingStroke(element: CanvasStroke | StrokeData): element is DrawingStroke {
-  return 'points' in element
-}
-
-function isRectElement(element: CanvasStroke | StrokeData): element is RectElementStroke {
-  return element.type === 'image' || element.type === 'text'
 }
 
 function updatePreset(key: 'color' | 'width', value: string | number) {
@@ -525,7 +579,7 @@ function renderFrame() {
   ctx.translate(offsetX.value, offsetY.value)
   ctx.scale(scale.value, scale.value)
 
-  drawStrokes(ctx, allToDraw)
+  drawStrokes(ctx, allToDraw, { imageCache, scheduleRender })
   drawSelectedElementOverlay(ctx)
   drawSelectionBox(ctx)
   ctx.restore()
@@ -540,160 +594,12 @@ function scheduleRender() {
   })
 }
 
-function drawStrokes(ctx: CanvasRenderingContext2D, strokes: (StrokeData & { failed?: boolean })[]) {
-  for (const stroke of strokes) {
-    if (stroke.type === 'image') {
-      drawImageElement(ctx, stroke)
-      continue
-    }
-
-    if (stroke.type === 'text') {
-      drawTextElement(ctx, stroke)
-      continue
-    }
-
-    if (stroke.points.length < 2) continue
-    ctx.beginPath()
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-    ctx.lineWidth = stroke.width
-    ctx.globalAlpha = stroke.opacity ?? 1
-
-    if (stroke.tool === 'eraser') {
-      ctx.globalCompositeOperation = 'destination-out'
-      ctx.strokeStyle = 'rgba(0,0,0,1)'
-    } else {
-      ctx.globalCompositeOperation = stroke.blend === 'multiply' ? 'multiply' : 'source-over'
-      ctx.strokeStyle = stroke.failed ? 'rgba(234,67,53,.45)' : stroke.color
-    }
-
-    ctx.moveTo(stroke.points[0].x, stroke.points[0].y)
-    if (stroke.points.length === 2) {
-      ctx.lineTo(stroke.points[1].x, stroke.points[1].y)
-    } else {
-      for (let i = 1; i < stroke.points.length - 1; i++) {
-        const midX = (stroke.points[i].x + stroke.points[i + 1].x) / 2
-        const midY = (stroke.points[i].y + stroke.points[i + 1].y) / 2
-        ctx.quadraticCurveTo(stroke.points[i].x, stroke.points[i].y, midX, midY)
-      }
-      const last = stroke.points[stroke.points.length - 1]
-      ctx.lineTo(last.x, last.y)
-    }
-    ctx.stroke()
-  }
-  ctx.globalAlpha = 1
-  ctx.globalCompositeOperation = 'source-over'
-}
-
-function drawImageElement(ctx: CanvasRenderingContext2D, image: Extract<StrokeData, { type: 'image' }> & { failed?: boolean }) {
-  const cached = imageCache.get(image.src)
-  ctx.save()
-  ctx.globalAlpha = 1
-  ctx.globalCompositeOperation = 'source-over'
-  const rotation = degreesToRadians(image.rotation ?? 0)
-  ctx.translate(image.x + image.width / 2, image.y + image.height / 2)
-  ctx.rotate(rotation)
-
-  if (cached instanceof HTMLImageElement && cached.complete && cached.naturalWidth > 0) {
-    ctx.drawImage(cached, -image.width / 2, -image.height / 2, image.width, image.height)
-  } else {
-    if (!cached) {
-      imageCache.set(image.src, 'loading')
-      const img = new Image()
-      img.onload = () => {
-        imageCache.set(image.src, img)
-        scheduleRender()
-      }
-      img.onerror = () => {
-        imageCache.set(image.src, 'error')
-        scheduleRender()
-      }
-      img.src = image.src
-    }
-
-    ctx.fillStyle = '#f7f8f5'
-    ctx.fillRect(-image.width / 2, -image.height / 2, image.width, image.height)
-    ctx.strokeStyle = cached === 'error' ? '#c0392b' : 'rgba(32,33,36,.24)'
-    ctx.lineWidth = 1
-    ctx.strokeRect(-image.width / 2, -image.height / 2, image.width, image.height)
-  }
-
-  if (image.failed) {
-    ctx.strokeStyle = 'rgba(234,67,53,.8)'
-    ctx.lineWidth = 2
-    ctx.strokeRect(-image.width / 2, -image.height / 2, image.width, image.height)
-  }
-
-  ctx.restore()
-}
-
-function drawTextElement(ctx: CanvasRenderingContext2D, text: Extract<StrokeData, { type: 'text' }> & { failed?: boolean }) {
-  const padding = Math.max(4, text.fontSize * 0.12)
-  const lineHeight = text.fontSize * 1.25
-  ctx.save()
-  ctx.globalAlpha = text.failed ? 0.55 : 1
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.translate(text.x + text.width / 2, text.y + text.height / 2)
-  ctx.rotate(degreesToRadians(text.rotation ?? 0))
-  ctx.beginPath()
-  ctx.rect(-text.width / 2, -text.height / 2, text.width, text.height)
-  ctx.clip()
-  ctx.font = getTextFont(text.fontSize)
-  ctx.fillStyle = text.color
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'top'
-
-  const lines = wrapTextLines(ctx, text.text, Math.max(1, text.width - padding * 2))
-  let y = -text.height / 2 + padding
-  for (const line of lines) {
-    if (y > text.height / 2) break
-    ctx.fillText(line, -text.width / 2 + padding, y)
-    y += lineHeight
-  }
-
-  if (text.failed) {
-    ctx.strokeStyle = 'rgba(234,67,53,.8)'
-    ctx.lineWidth = 2
-    ctx.strokeRect(-text.width / 2, -text.height / 2, text.width, text.height)
-  }
-
-  ctx.restore()
-}
-
-function getTextFont(fontSize: number) {
-  return `${fontSize}px ${TEXT_FONT_FAMILY}`
-}
-
-function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
-  const paragraphs = text.split(/\r?\n/)
-  const lines: string[] = []
-  for (const paragraph of paragraphs) {
-    if (!paragraph) {
-      lines.push('')
-      continue
-    }
-
-    let line = ''
-    for (const char of Array.from(paragraph)) {
-      const next = line + char
-      if (line && ctx.measureText(next).width > maxWidth) {
-        lines.push(line)
-        line = char
-      } else {
-        line = next
-      }
-    }
-    lines.push(line)
-  }
-  return lines
-}
-
 function drawSelectedElementOverlay(ctx: CanvasRenderingContext2D) {
   const elements = getSelectedElements()
   if (elements.length === 0) return
 
-  const handle = getHandleSize()
-  const geometry = getInteractiveGeometry(getSelectionGeometry(elements))
+  const handle = getHandleSize(scale.value)
+  const geometry = getInteractiveGeometry(getSelectionGeometry(elements), scale.value)
   const rotateOffset = 34 / scale.value
   ctx.save()
   ctx.globalAlpha = 1
@@ -711,7 +617,7 @@ function drawSelectedElementOverlay(ctx: CanvasRenderingContext2D) {
   ctx.lineTo(0, -geometry.height / 2 - rotateOffset)
   ctx.stroke()
 
-  for (const point of getElementHandlePoints(geometry)) {
+  for (const point of getElementHandlePoints(geometry, scale.value)) {
     const radius = point.mode === 'rotate' ? handle * 0.58 : handle / 2
     ctx.beginPath()
     if (point.mode === 'rotate') {
@@ -749,10 +655,6 @@ function drawSelectionBox(ctx: CanvasRenderingContext2D) {
   ctx.restore()
 }
 
-function elementKey(element: CanvasStroke): string {
-  return element.id ? `id:${element.id}` : `local:${element.localId || ''}`
-}
-
 function getSelectedElements(): CanvasStroke[] {
   const keys = new Set(selectedElementKeys.value)
   if (keys.size === 0) return []
@@ -767,221 +669,8 @@ function isElementSelected(element: CanvasStroke) {
   return selectedElementKeys.value.includes(elementKey(element))
 }
 
-function cloneElement(element: CanvasStroke): CanvasStroke {
-  if (isRectElement(element)) return { ...element }
-  return {
-    ...element,
-    points: element.points.map(point => ({ ...point })),
-  }
-}
-
-function getHandleSize() {
-  return Math.max(10 / scale.value, 8)
-}
-
-function getMinSelectionSize() {
-  return Math.max(56 / scale.value, 28)
-}
-
-function getInteractiveGeometry(geometry: ElementGeometry): ElementGeometry {
-  const minSize = getMinSelectionSize()
-  return {
-    ...geometry,
-    width: Math.max(geometry.width, minSize),
-    height: Math.max(geometry.height, minSize),
-  }
-}
-
-function getElementHandlePoints(geometry: ElementGeometry) {
-  const w = geometry.width
-  const h = geometry.height
-  const rotateOffset = 34 / scale.value
-  return [
-    { mode: 'resize-nw' as const, local: { x: -w / 2, y: -h / 2 } },
-    { mode: 'resize-n' as const, local: { x: 0, y: -h / 2 } },
-    { mode: 'resize-ne' as const, local: { x: w / 2, y: -h / 2 } },
-    { mode: 'resize-e' as const, local: { x: w / 2, y: 0 } },
-    { mode: 'resize-se' as const, local: { x: w / 2, y: h / 2 } },
-    { mode: 'resize-s' as const, local: { x: 0, y: h / 2 } },
-    { mode: 'resize-sw' as const, local: { x: -w / 2, y: h / 2 } },
-    { mode: 'resize-w' as const, local: { x: -w / 2, y: 0 } },
-    { mode: 'rotate' as const, local: { x: 0, y: -h / 2 - rotateOffset } },
-  ]
-}
-
-function hitTestElements(point: Point): { element: CanvasStroke; mode: TransformMode } | null {
-  const selected = getSelectedElements()
-  if (selected.length > 0) {
-    const geometry = getInteractiveGeometry(getSelectionGeometry(selected))
-    const handleMode = hitTestGeometryHandle(point, geometry)
-    if (handleMode) return { element: selected[0], mode: handleMode }
-    if (isPointInsideGeometry(point, geometry)) return { element: selected[0], mode: 'move' }
-  }
-
-  for (let i = allStrokes.value.length - 1; i >= 0; i--) {
-    const stroke = allStrokes.value[i]
-    if (isDrawingStroke(stroke) && stroke.tool === 'eraser') continue
-    if (isPointInsideElement(point, stroke)) return { element: stroke, mode: 'move' }
-  }
-
-  return null
-}
-
-function hitTestElementHandle(point: Point, element: CanvasStroke): TransformMode | null {
-  return hitTestGeometryHandle(point, getElementGeometry(element))
-}
-
-function hitTestGeometryHandle(point: Point, geometry: ElementGeometry): TransformMode | null {
-  const local = worldToElementCenteredLocal(point, geometry)
-  const hitSize = getHandleSize() * 1.5
-  for (const handle of getElementHandlePoints(geometry)) {
-    if (Math.abs(local.x - handle.local.x) <= hitSize / 2 && Math.abs(local.y - handle.local.y) <= hitSize / 2) {
-      return handle.mode
-    }
-  }
-  return null
-}
-
-function isPointInsideGeometry(point: Point, geometry: ElementGeometry) {
-  const local = worldToElementCenteredLocal(point, geometry)
-  return Math.abs(local.x) <= geometry.width / 2 && Math.abs(local.y) <= geometry.height / 2
-}
-
-function isPointInsideElement(point: Point, element: CanvasStroke) {
-  if (isRectElement(element)) {
-    const geometry = getElementGeometry(element)
-    const local = worldToElementCenteredLocal(point, geometry)
-    return Math.abs(local.x) <= geometry.width / 2 && Math.abs(local.y) <= geometry.height / 2
-  }
-
-  return isPointNearDrawingStroke(point, element)
-}
-
-function isPointNearDrawingStroke(point: Point, stroke: DrawingStroke) {
-  const tolerance = Math.max(8 / scale.value, stroke.width / 2 + 4 / scale.value)
-  const thresholdSq = tolerance * tolerance
-  for (let i = 0; i < stroke.points.length - 1; i++) {
-    if (distanceToSegmentSq(point, stroke.points[i], stroke.points[i + 1]) <= thresholdSq) return true
-  }
-  return false
-}
-
-function distanceToSegmentSq(point: Point, a: Point, b: Point) {
-  const dx = b.x - a.x
-  const dy = b.y - a.y
-  const lenSq = dx * dx + dy * dy
-  if (lenSq === 0) return distanceSq(point, a)
-  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lenSq))
-  const projected = { x: a.x + t * dx, y: a.y + t * dy }
-  return distanceSq(point, projected)
-}
-
-function distanceSq(a: Point, b: Point) {
-  const dx = a.x - b.x
-  const dy = a.y - b.y
-  return dx * dx + dy * dy
-}
-
-function worldToElementCenteredLocal(point: Point, geometry: ElementGeometry): Point {
-  return rotatePoint({
-    x: point.x - geometry.center.x,
-    y: point.y - geometry.center.y,
-  }, -degreesToRadians(geometry.rotation))
-}
-
-function elementLocalToWorld(local: Point, geometry: ElementGeometry): Point {
-  const rotated = rotatePoint({
-    x: local.x - geometry.width / 2,
-    y: local.y - geometry.height / 2,
-  }, degreesToRadians(geometry.rotation))
-  return { x: geometry.center.x + rotated.x, y: geometry.center.y + rotated.y }
-}
-
-function getElementGeometry(element: CanvasStroke): ElementGeometry {
-  if (isRectElement(element)) {
-    return {
-      center: { x: element.x + element.width / 2, y: element.y + element.height / 2 },
-      width: element.width,
-      height: element.height,
-      rotation: element.rotation ?? 0,
-    }
-  }
-
-  const bounds = getDrawingStrokeBounds(element)
-  return {
-    center: { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 },
-    width: Math.max(1, bounds.maxX - bounds.minX),
-    height: Math.max(1, bounds.maxY - bounds.minY),
-    rotation: 0,
-  }
-}
-
-function getSelectionGeometry(elements: CanvasStroke[]): ElementGeometry {
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const element of elements) {
-    for (const corner of getElementWorldCorners(element)) {
-      minX = Math.min(minX, corner.x)
-      minY = Math.min(minY, corner.y)
-      maxX = Math.max(maxX, corner.x)
-      maxY = Math.max(maxY, corner.y)
-    }
-  }
-  if (!Number.isFinite(minX)) {
-    minX = 0
-    minY = 0
-    maxX = 1
-    maxY = 1
-  }
-  return {
-    center: { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
-    width: Math.max(1, maxX - minX),
-    height: Math.max(1, maxY - minY),
-    rotation: 0,
-  }
-}
-
-function getDrawingStrokeBounds(stroke: DrawingStroke) {
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const point of stroke.points) {
-    minX = Math.min(minX, point.x)
-    minY = Math.min(minY, point.y)
-    maxX = Math.max(maxX, point.x)
-    maxY = Math.max(maxY, point.y)
-  }
-  return { minX, minY, maxX, maxY }
-}
-
-function getElementWorldCorners(element: CanvasStroke): Point[] {
-  const geometry = getElementGeometry(element)
-  return [
-    elementLocalToWorld({ x: 0, y: 0 }, geometry),
-    elementLocalToWorld({ x: geometry.width, y: 0 }, geometry),
-    elementLocalToWorld({ x: geometry.width, y: geometry.height }, geometry),
-    elementLocalToWorld({ x: 0, y: geometry.height }, geometry),
-  ]
-}
-
-function rotatePoint(point: Point, radians: number): Point {
-  const cos = Math.cos(radians)
-  const sin = Math.sin(radians)
-  return {
-    x: point.x * cos - point.y * sin,
-    y: point.x * sin + point.y * cos,
-  }
-}
-
-function degreesToRadians(degrees: number) {
-  return degrees * Math.PI / 180
-}
-
-function radiansToDegrees(radians: number) {
-  return radians * 180 / Math.PI
+function hitTestElements(point: Point) {
+  return hitTestSelectionElements(point, allStrokes.value, getSelectedElements(), scale.value)
 }
 
 function onPointerDown(e: PointerEvent) {
@@ -1008,6 +697,10 @@ function onPointerDown(e: PointerEvent) {
   const worldPoint = screenToWorld(e.clientX, e.clientY)
   if (currentTool.value === 'text') {
     e.preventDefault()
+    if (textEditor.value) {
+      void commitTextEditor()
+      return
+    }
     beginTextInsertion(worldPoint)
     return
   }
@@ -1017,7 +710,7 @@ function onPointerDown(e: PointerEvent) {
     e.preventDefault()
     if (!isElementSelected(hit.element)) setSelectedElements([hit.element])
     const selected = getSelectedElements()
-    const geometry = getInteractiveGeometry(getSelectionGeometry(selected))
+    const geometry = getInteractiveGeometry(getSelectionGeometry(selected), scale.value)
     isElementTransforming.value = true
     elementTransform = {
       mode: hit.mode,
@@ -1080,7 +773,7 @@ function onPointerMove(e: PointerEvent) {
   }
 
   if (isElementTransforming.value && elementTransform) {
-    updateElementTransform(screenToWorld(e.clientX, e.clientY))
+    applyElementTransform(screenToWorld(e.clientX, e.clientY), elementTransform, allStrokes.value)
     renderFrame()
     return
   }
@@ -1190,39 +883,9 @@ function selectElementsInBox() {
 
   const selected = allStrokes.value.filter(stroke => {
     if (isDrawingStroke(stroke) && stroke.tool === 'eraser') return false
-    return elementIntersectsBox(stroke, { left, right, top, bottom })
+    return elementIntersectsBox(stroke, { left, right, top, bottom }, scale.value)
   })
   setSelectedElements(selected)
-}
-
-function elementIntersectsBox(element: CanvasStroke, box: { left: number; right: number; top: number; bottom: number }) {
-  if (isRectElement(element)) {
-    const corners = getElementWorldCorners(element)
-    if (corners.some(point => pointInBox(point, box))) return true
-    const boxCorners = [
-      { x: box.left, y: box.top },
-      { x: box.right, y: box.top },
-      { x: box.right, y: box.bottom },
-      { x: box.left, y: box.bottom },
-    ]
-    return boxCorners.some(point => isPointInsideElement(point, element))
-  }
-
-  if (element.points.some(point => pointInBox(point, box))) return true
-  const edges: Array<[Point, Point]> = [
-    [{ x: box.left, y: box.top }, { x: box.right, y: box.top }],
-    [{ x: box.right, y: box.top }, { x: box.right, y: box.bottom }],
-    [{ x: box.right, y: box.bottom }, { x: box.left, y: box.bottom }],
-    [{ x: box.left, y: box.bottom }, { x: box.left, y: box.top }],
-  ]
-  for (let i = 0; i < element.points.length - 1; i++) {
-    if (edges.some(([a, b]) => segmentsIntersect(element.points[i], element.points[i + 1], a, b))) return true
-  }
-  return false
-}
-
-function pointInBox(point: Point, box: { left: number; right: number; top: number; bottom: number }) {
-  return point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom
 }
 
 function eraseBetween(from: Point, to: Point) {
@@ -1257,37 +920,6 @@ function eraseWholeStrokesBetween(from: Point, to: Point) {
   localUndoStack.value = localUndoStack.value.filter(stroke => !removedKeys.has(elementKey(stroke)))
   if (selectedElementKeys.value.some(key => removedKeys.has(key))) clearSelection()
   for (const id of removedIds) pendingEraseIds.add(id)
-}
-
-function strokeIntersectsEraser(stroke: DrawingStroke, from: Point, to: Point, radius: number) {
-  const threshold = radius + stroke.width / 2
-  const thresholdSq = threshold * threshold
-  for (let i = 0; i < stroke.points.length - 1; i++) {
-    if (segmentDistanceSq(from, to, stroke.points[i], stroke.points[i + 1]) <= thresholdSq) return true
-  }
-  return false
-}
-
-function segmentDistanceSq(a: Point, b: Point, c: Point, d: Point) {
-  if (segmentsIntersect(a, b, c, d)) return 0
-  return Math.min(
-    distanceToSegmentSq(a, c, d),
-    distanceToSegmentSq(b, c, d),
-    distanceToSegmentSq(c, a, b),
-    distanceToSegmentSq(d, a, b),
-  )
-}
-
-function segmentsIntersect(a: Point, b: Point, c: Point, d: Point) {
-  const o1 = orientation(a, b, c)
-  const o2 = orientation(a, b, d)
-  const o3 = orientation(c, d, a)
-  const o4 = orientation(c, d, b)
-  return o1 * o2 < 0 && o3 * o4 < 0
-}
-
-function orientation(a: Point, b: Point, c: Point) {
-  return Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
 }
 
 function eraseCutSegmentsBetween(from: Point, to: Point) {
@@ -1339,42 +971,6 @@ function eraseCutSegmentsBetween(from: Point, to: Point) {
   for (const id of removedIds) pendingEraseIds.add(id)
 }
 
-function cutStrokeByEraser(stroke: DrawingStroke, from: Point, to: Point, radius: number): Point[][] | null {
-  const threshold = radius + stroke.width / 2
-  const thresholdSq = threshold * threshold
-  const sampleSpacing = Math.max(2, threshold / 2)
-  const segments: Point[][] = []
-  let current: Point[] = []
-  let removedAny = false
-
-  for (let i = 0; i < stroke.points.length - 1; i++) {
-    const a = stroke.points[i]
-    const b = stroke.points[i + 1]
-    const steps = Math.max(1, Math.ceil(getDistance(a, b) / sampleSpacing))
-    for (let step = 0; step <= steps; step++) {
-      if (i > 0 && step === 0) continue
-      const t = step / steps
-      const point = {
-        x: a.x + (b.x - a.x) * t,
-        y: a.y + (b.y - a.y) * t,
-      }
-      const erased = distanceToSegmentSq(point, from, to) <= thresholdSq
-      if (erased) {
-        removedAny = true
-        if (current.length >= 2) segments.push(current)
-        current = []
-        continue
-      }
-      if (current.length === 0 || distanceSq(current[current.length - 1], point) > 0.01) {
-        current.push(point)
-      }
-    }
-  }
-
-  if (current.length >= 2) segments.push(current)
-  return removedAny ? segments : null
-}
-
 function applyStrokeSegment(stroke: DrawingStroke, points: Point[]) {
   stroke.points = points
 }
@@ -1420,231 +1016,6 @@ async function flushPendingEraseChanges() {
   }
 }
 
-function updateElementTransform(pointer: Point) {
-  if (!elementTransform) return
-  const startGeometry = elementTransform.startGeometry
-
-  if (elementTransform.mode === 'move') {
-    const delta = {
-      x: pointer.x - elementTransform.startPointer.x,
-      y: pointer.y - elementTransform.startPointer.y,
-    }
-    for (const start of elementTransform.startElements) {
-      const element = allStrokes.value.find(stroke => elementKey(stroke) === elementKey(start))
-      if (element) moveElement(element, start, delta)
-    }
-    return
-  }
-
-  if (elementTransform.mode === 'rotate') {
-    const center = startGeometry.center
-    const nextAngle = Math.atan2(pointer.y - center.y, pointer.x - center.x)
-    const degrees = radiansToDegrees(nextAngle - elementTransform.startAngle)
-    for (const start of elementTransform.startElements) {
-      const element = allStrokes.value.find(stroke => elementKey(stroke) === elementKey(start))
-      if (element) rotateElement(element, start, startGeometry, degrees)
-    }
-    return
-  }
-
-  resizeElementGroupFromHandle(elementTransform.startElements, startGeometry, pointer, elementTransform.mode)
-}
-
-function moveElement(element: CanvasStroke, start: CanvasStroke, delta: Point) {
-  if (isRectElement(element) && isRectElement(start)) {
-    element.x = start.x + delta.x
-    element.y = start.y + delta.y
-    return
-  }
-
-  if (isDrawingStroke(element) && isDrawingStroke(start)) {
-    element.points = start.points.map(point => ({ x: point.x + delta.x, y: point.y + delta.y }))
-  }
-}
-
-function rotateElement(element: CanvasStroke, start: CanvasStroke, startGeometry: ElementGeometry, degrees: number) {
-  if (isRectElement(element) && isRectElement(start)) {
-    const center = getElementGeometry(start).center
-    const rotatedCenter = rotatePoint({ x: center.x - startGeometry.center.x, y: center.y - startGeometry.center.y }, degreesToRadians(degrees))
-    element.rotation = normalizeDegrees((start.rotation ?? 0) + degrees)
-    element.x = startGeometry.center.x + rotatedCenter.x - start.width / 2
-    element.y = startGeometry.center.y + rotatedCenter.y - start.height / 2
-    return
-  }
-
-  if (isDrawingStroke(element) && isDrawingStroke(start)) {
-    const radians = degreesToRadians(degrees)
-    element.points = start.points.map(point => {
-      const rotated = rotatePoint({ x: point.x - startGeometry.center.x, y: point.y - startGeometry.center.y }, radians)
-      return { x: startGeometry.center.x + rotated.x, y: startGeometry.center.y + rotated.y }
-    })
-  }
-}
-
-function resizeElementGroupFromHandle(startElements: CanvasStroke[], startGeometry: ElementGeometry, pointer: Point, mode: TransformMode) {
-  const rect = getResizedSelectionRect(startGeometry, pointer, mode)
-  for (const start of startElements) {
-    const element = allStrokes.value.find(stroke => elementKey(stroke) === elementKey(start))
-    if (element) applyElementResize(element, start, startGeometry, rect)
-  }
-}
-
-function getResizedSelectionRect(startGeometry: ElementGeometry, pointer: Point, mode: TransformMode) {
-  const localCentered = worldToElementCenteredLocal(pointer, startGeometry)
-  const p = { x: localCentered.x + startGeometry.width / 2, y: localCentered.y + startGeometry.height / 2 }
-  const minSize = 24
-  let left = 0
-  let right = startGeometry.width
-  let top = 0
-  let bottom = startGeometry.height
-  const isCorner = mode === 'resize-nw' || mode === 'resize-ne' || mode === 'resize-se' || mode === 'resize-sw'
-
-  if (isCorner) {
-    const anchor = getResizeAnchor(startGeometry, mode)
-    const scaleX = Math.abs(p.x - anchor.x) / startGeometry.width
-    const scaleY = Math.abs(p.y - anchor.y) / startGeometry.height
-    const nextScale = Math.max(minSize / startGeometry.width, minSize / startGeometry.height, scaleX, scaleY)
-    const nextWidth = startGeometry.width * nextScale
-    const nextHeight = startGeometry.height * nextScale
-
-    if (mode === 'resize-se') {
-      right = nextWidth
-      bottom = nextHeight
-    } else if (mode === 'resize-sw') {
-      left = startGeometry.width - nextWidth
-      right = startGeometry.width
-      bottom = nextHeight
-    } else if (mode === 'resize-ne') {
-      top = startGeometry.height - nextHeight
-      right = nextWidth
-      bottom = startGeometry.height
-    } else {
-      left = startGeometry.width - nextWidth
-      top = startGeometry.height - nextHeight
-      right = startGeometry.width
-      bottom = startGeometry.height
-    }
-  } else {
-    if (mode === 'resize-w') left = Math.min(startGeometry.width - minSize, p.x)
-    if (mode === 'resize-e') right = Math.max(minSize, p.x)
-    if (mode === 'resize-n') top = Math.min(startGeometry.height - minSize, p.y)
-    if (mode === 'resize-s') bottom = Math.max(minSize, p.y)
-  }
-
-  const width = Math.max(minSize, right - left)
-  const height = Math.max(minSize, bottom - top)
-  return {
-    left,
-    top,
-    width,
-    height,
-    center: elementLocalToWorld({ x: (left + right) / 2, y: (top + bottom) / 2 }, startGeometry),
-  }
-}
-
-function resizeElementFromHandle(element: CanvasStroke, start: CanvasStroke, startGeometry: ElementGeometry, pointer: Point, mode: TransformMode) {
-  const localCentered = worldToElementCenteredLocal(pointer, startGeometry)
-  const p = { x: localCentered.x + startGeometry.width / 2, y: localCentered.y + startGeometry.height / 2 }
-  const minSize = 24
-  let left = 0
-  let right = startGeometry.width
-  let top = 0
-  let bottom = startGeometry.height
-  const isCorner = mode === 'resize-nw' || mode === 'resize-ne' || mode === 'resize-se' || mode === 'resize-sw'
-
-  if (isCorner) {
-    const anchor = getResizeAnchor(startGeometry, mode)
-    const scaleX = Math.abs(p.x - anchor.x) / startGeometry.width
-    const scaleY = Math.abs(p.y - anchor.y) / startGeometry.height
-    const nextScale = Math.max(minSize / startGeometry.width, minSize / startGeometry.height, scaleX, scaleY)
-    const nextWidth = startGeometry.width * nextScale
-    const nextHeight = startGeometry.height * nextScale
-
-    if (mode === 'resize-se') {
-      left = 0
-      top = 0
-      right = nextWidth
-      bottom = nextHeight
-    } else if (mode === 'resize-sw') {
-      left = startGeometry.width - nextWidth
-      top = 0
-      right = startGeometry.width
-      bottom = nextHeight
-    } else if (mode === 'resize-ne') {
-      left = 0
-      top = startGeometry.height - nextHeight
-      right = nextWidth
-      bottom = startGeometry.height
-    } else {
-      left = startGeometry.width - nextWidth
-      top = startGeometry.height - nextHeight
-      right = startGeometry.width
-      bottom = startGeometry.height
-    }
-  } else {
-    if (mode === 'resize-w') left = Math.min(startGeometry.width - minSize, p.x)
-    if (mode === 'resize-e') right = Math.max(minSize, p.x)
-    if (mode === 'resize-n') top = Math.min(startGeometry.height - minSize, p.y)
-    if (mode === 'resize-s') bottom = Math.max(minSize, p.y)
-  }
-
-  const nextWidth = Math.max(minSize, right - left)
-  const nextHeight = Math.max(minSize, bottom - top)
-  const nextCenter = elementLocalToWorld({ x: (left + right) / 2, y: (top + bottom) / 2 }, startGeometry)
-  applyElementResize(element, start, startGeometry, { left, top, width: nextWidth, height: nextHeight, center: nextCenter })
-}
-
-function applyElementResize(
-  element: CanvasStroke,
-  start: CanvasStroke,
-  startGeometry: ElementGeometry,
-  rect: { left: number; top: number; width: number; height: number; center: Point },
-) {
-  const sx = rect.width / startGeometry.width
-  const sy = rect.height / startGeometry.height
-  if (isRectElement(element) && isRectElement(start)) {
-    const startCenter = getElementGeometry(start).center
-    const localCenter = worldToElementCenteredLocal(startCenter, startGeometry)
-    const nextLocalCenter = {
-      x: rect.left + (localCenter.x + startGeometry.width / 2) * sx,
-      y: rect.top + (localCenter.y + startGeometry.height / 2) * sy,
-    }
-    const nextCenter = elementLocalToWorld(nextLocalCenter, { ...startGeometry, center: rect.center, width: rect.width, height: rect.height })
-    element.width = Math.max(1, start.width * Math.abs(sx))
-    element.height = Math.max(1, start.height * Math.abs(sy))
-    element.x = nextCenter.x - element.width / 2
-    element.y = nextCenter.y - element.height / 2
-    element.rotation = start.rotation ?? 0
-    if (element.type === 'text' && start.type === 'text') {
-      element.fontSize = Math.max(8, Math.min(160, start.fontSize * ((Math.abs(sx) + Math.abs(sy)) / 2)))
-    }
-    return
-  }
-
-  if (isDrawingStroke(element) && isDrawingStroke(start)) {
-    element.points = start.points.map(point => {
-      const local = worldToElementCenteredLocal(point, startGeometry)
-      const nextLocal = {
-        x: rect.left + (local.x + startGeometry.width / 2) * sx,
-        y: rect.top + (local.y + startGeometry.height / 2) * sy,
-      }
-      return elementLocalToWorld(nextLocal, { ...startGeometry, center: rect.center, width: rect.width, height: rect.height })
-    })
-    element.width = Math.max(1, start.width * ((Math.abs(sx) + Math.abs(sy)) / 2))
-  }
-}
-
-function getResizeAnchor(geometry: ElementGeometry, mode: TransformMode): Point {
-  if (mode === 'resize-se') return { x: 0, y: 0 }
-  if (mode === 'resize-sw') return { x: geometry.width, y: 0 }
-  if (mode === 'resize-ne') return { x: 0, y: geometry.height }
-  return { x: geometry.width, y: geometry.height }
-}
-
-function normalizeDegrees(degrees: number) {
-  return ((degrees % 360) + 360) % 360
-}
-
 function onWheel(e: WheelEvent) {
   const rect = canvasRef.value!.getBoundingClientRect()
   const mx = e.clientX - rect.left
@@ -1685,6 +1056,9 @@ function beginTextInsertion(point: Point) {
     rotation: 0,
     fontSize: box.fontSize,
     color: currentColor.value,
+    align: 'left',
+    bold: false,
+    italic: false,
   }
   selectedElementKeys.value = []
   focusTextEditor()
@@ -1702,6 +1076,9 @@ function beginTextEdit(element: TextStroke) {
     rotation: element.rotation ?? 0,
     fontSize: element.fontSize,
     color: element.color,
+    align: element.align ?? 'left',
+    bold: element.bold ?? false,
+    italic: element.italic ?? false,
   }
   focusTextEditor(true)
 }
@@ -1720,8 +1097,60 @@ function onTextEditorInput(e: Event) {
   if (!editor) return
   const input = e.target as HTMLTextAreaElement
   editor.text = input.value
-  const measured = measureInsertedText(input.value, editor.fontSize, editor.width)
+  const measured = measureInsertedText(input.value, editor.fontSize, editor.width, editor.bold, editor.italic)
   editor.height = Math.max(editor.height, measured.height)
+}
+
+function startTextToolbarInteraction() {
+  textToolbarInteraction = true
+  window.setTimeout(() => {
+    textToolbarInteraction = false
+  }, 0)
+}
+
+function onTextEditorBlur(e: FocusEvent) {
+  if (textToolbarInteraction || isTextEditorUiTarget(e.relatedTarget)) return
+  void commitTextEditor()
+}
+
+function onTextToolbarFocusOut(e: FocusEvent) {
+  if (isTextEditorUiTarget(e.relatedTarget)) return
+  void commitTextEditor()
+}
+
+function isTextEditorUiTarget(target: EventTarget | null) {
+  if (!(target instanceof Node)) return false
+  return !!textEditorRef.value?.contains(target) || !!textToolbarRef.value?.contains(target)
+}
+
+function updateTextEditorColor(color: string) {
+  if (!textEditor.value) return
+  textEditor.value.color = color
+  focusTextEditor()
+}
+
+function updateTextEditorFontSize(fontSize: number) {
+  const editor = textEditor.value
+  if (!editor || !Number.isFinite(fontSize)) return
+  editor.fontSize = clampTextFontSize(fontSize)
+  const measured = measureInsertedText(editor.text, editor.fontSize, editor.width, editor.bold, editor.italic)
+  editor.height = Math.max(36, measured.height)
+  focusTextEditor()
+}
+
+function toggleTextEditorStyle(style: 'bold' | 'italic') {
+  const editor = textEditor.value
+  if (!editor) return
+  editor[style] = !editor[style]
+  const measured = measureInsertedText(editor.text, editor.fontSize, editor.width, editor.bold, editor.italic)
+  editor.height = Math.max(editor.height, measured.height)
+  focusTextEditor()
+}
+
+function setTextEditorAlign(align: NonNullable<TextElementData['align']>) {
+  if (!textEditor.value) return
+  textEditor.value.align = align
+  focusTextEditor()
 }
 
 function onTextEditorKeyDown(e: KeyboardEvent) {
@@ -1752,7 +1181,7 @@ async function commitTextEditor() {
     return
   }
 
-  const measured = measureInsertedText(text, editor.fontSize, editor.width)
+  const measured = measureInsertedText(text, editor.fontSize, editor.width, editor.bold, editor.italic)
   const width = Math.max(editor.width, measured.width)
   const height = Math.max(editor.height, measured.height)
 
@@ -1767,6 +1196,9 @@ async function commitTextEditor() {
       element.rotation = editor.rotation
       element.fontSize = editor.fontSize
       element.color = editor.color
+      element.align = editor.align
+      element.bold = editor.bold
+      element.italic = editor.italic
       setSelectedElements([element])
       await saveElementTransform(element)
     }
@@ -1784,6 +1216,9 @@ async function commitTextEditor() {
     rotation: editor.rotation,
     fontSize: editor.fontSize,
     color: editor.color,
+    align: editor.align,
+    bold: editor.bold,
+    italic: editor.italic,
   }, currentPage.value)
 
   allStrokes.value.push(element)
@@ -1798,24 +1233,8 @@ async function commitTextEditor() {
   renderFrame()
 }
 
-function measureInsertedText(text = '', fontSize = DEFAULT_TEXT_FONT_SIZE, width = DEFAULT_TEXT_WIDTH) {
-  const maxWidth = width
-  const padding = Math.max(4, fontSize * 0.12)
-  const lineHeight = fontSize * 1.25
-  const ctx = canvasRef.value?.getContext('2d')
-  if (!ctx) return { width, height: Math.ceil(lineHeight + padding * 2), fontSize }
-
-  ctx.save()
-  ctx.font = getTextFont(fontSize)
-  const lines = wrapTextLines(ctx, text, maxWidth - padding * 2)
-  const textWidth = lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0)
-  ctx.restore()
-
-  return {
-    width: Math.min(maxWidth, Math.max(80, Math.ceil(textWidth + padding * 2))),
-    height: Math.max(36, Math.ceil(lines.length * lineHeight + padding * 2)),
-    fontSize,
-  }
+function measureInsertedText(text = '', fontSize = DEFAULT_TEXT_FONT_SIZE, width = DEFAULT_TEXT_WIDTH, bold = false, italic = false) {
+  return measureTextBox(canvasRef.value?.getContext('2d'), text, fontSize, width, bold, italic)
 }
 
 function onImageFileChange(e: Event) {
@@ -1995,7 +1414,7 @@ function renderMiniMap() {
   ctx.save()
   ctx.translate(ox - bounds.minX * mapScale, oy - bounds.minY * mapScale)
   ctx.scale(mapScale, mapScale)
-  drawStrokes(ctx, allStrokes.value)
+  drawStrokes(ctx, allStrokes.value, { imageCache, scheduleRender })
   ctx.restore()
 
   const view = getViewportWorldBounds()
