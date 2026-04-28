@@ -2,7 +2,7 @@
   <div class="whiteboard-wrap" :class="{ 'web-fullscreen': isWebFullscreen }" ref="wrapRef">
     <canvas
       ref="canvasRef"
-      :style="{ cursor: currentTool === 'drag' ? (isPanning ? 'grabbing' : 'grab') : 'crosshair' }"
+      :style="{ cursor: canvasCursor }"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
@@ -227,6 +227,11 @@ const eraserWidth = ref(20)
 
 const failedCount = computed(() => allStrokes.value.filter(s => s.failed && !s.id).length)
 const canUndo = computed(() => localUndoStack.value.length > 0)
+const canvasCursor = computed(() => {
+  if (isPanning.value) return 'grabbing'
+  if (currentTool.value === 'drag' || spaceHeld.value) return 'grab'
+  return 'crosshair'
+})
 const wsTitle = computed(() => {
   if (wsState.value === 'online') return '实时同步已连接'
   if (wsState.value === 'connecting') return '实时同步连接中'
@@ -429,7 +434,8 @@ function onPointerDown(e: PointerEvent) {
     }
   }
 
-  if (e.button === 1 || (e.button === 0 && (spaceHeld.value || currentTool.value === 'drag'))) {
+  if (e.button === 2 || e.button === 1 || (e.button === 0 && (spaceHeld.value || currentTool.value === 'drag'))) {
+    e.preventDefault()
     isPanning.value = true
     return
   }
