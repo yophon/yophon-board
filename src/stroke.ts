@@ -52,6 +52,49 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
     return { ok: true, value: normalizedImage };
   }
 
+  if (stroke?.type === "text") {
+    const text = typeof stroke.text === "string" ? stroke.text.trim().slice(0, 2000) : "";
+    if (!text) return { ok: false, message: "文本不能为空" };
+
+    const x = Number(stroke.x);
+    const y = Number(stroke.y);
+    const width = Number(stroke.width);
+    const height = Number(stroke.height);
+    const fontSize = Number(stroke.fontSize);
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !Number.isFinite(fontSize) ||
+      width < 10 ||
+      height < 10 ||
+      width > 4096 ||
+      height > 4096 ||
+      fontSize < 8 ||
+      fontSize > 160
+    ) {
+      return { ok: false, message: "文本尺寸不合法" };
+    }
+
+    const color = typeof stroke.color === "string" && /^#[0-9a-fA-F]{6}$/.test(stroke.color)
+      ? stroke.color
+      : "#202124";
+    const normalizedText = JSON.stringify({
+      type: "text",
+      text,
+      x: Math.round(x * 100) / 100,
+      y: Math.round(y * 100) / 100,
+      width: Math.round(width * 100) / 100,
+      height: Math.round(height * 100) / 100,
+      rotation: normalizeRotation(stroke.rotation),
+      fontSize: Math.round(fontSize * 10) / 10,
+      color,
+    });
+    if (normalizedText.length > STROKE_MAX_BYTES) return { ok: false, message: "涂鸦数据过大" };
+    return { ok: true, value: normalizedText };
+  }
+
   const points = stroke?.points;
   if (!Array.isArray(points) || points.length < 2 || points.length > STROKE_MAX_POINTS) {
     return { ok: false, message: "涂鸦点位不合法" };

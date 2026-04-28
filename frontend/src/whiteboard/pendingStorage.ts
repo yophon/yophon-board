@@ -48,6 +48,23 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
           }
         }
 
+        if (stroke.type === 'text') {
+          return {
+            type: 'text' as const,
+            text: stroke.text,
+            x: stroke.x,
+            y: stroke.y,
+            width: stroke.width,
+            height: stroke.height,
+            rotation: stroke.rotation,
+            fontSize: stroke.fontSize,
+            color: stroke.color,
+            page: stroke.page,
+            localId: stroke.localId,
+            retryCount: stroke.retryCount,
+          }
+        }
+
         return {
           points: stroke.points,
           color: stroke.color,

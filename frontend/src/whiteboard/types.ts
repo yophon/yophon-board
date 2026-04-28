@@ -24,7 +24,19 @@ export interface ImageElementData {
   mime?: string
 }
 
-export type StrokeData = DrawingStrokeData | ImageElementData
+export interface TextElementData {
+  type: 'text'
+  text: string
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation?: number
+  fontSize: number
+  color: string
+}
+
+export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData
 
 export type CanvasStroke = StrokeData & {
   id?: number

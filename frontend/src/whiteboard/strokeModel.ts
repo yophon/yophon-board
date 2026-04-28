@@ -29,6 +29,22 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
     }
   }
 
+  if (stroke.type === 'text') {
+    return {
+      type: 'text',
+      text: stroke.text,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      fontSize: stroke.fontSize,
+      color: stroke.color,
+      page,
+      localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    }
+  }
+
   return {
     points: simplifyPoints(stroke.points, stroke.width),
     color: stroke.color,
@@ -52,6 +68,20 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       mime: stroke.mime,
+    }
+  }
+
+  if (stroke.type === 'text') {
+    return {
+      type: 'text',
+      text: stroke.text,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      fontSize: stroke.fontSize,
+      color: stroke.color,
     }
   }
 
@@ -84,6 +114,25 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
       }
       if (!image.src || !Number.isFinite(image.x) || !Number.isFinite(image.y) || !Number.isFinite(image.width) || !Number.isFinite(image.height)) return null
       return image
+    }
+
+    if (stroke.type === 'text') {
+      const text = {
+        id: row.id,
+        created_at: row.created_at,
+        type: 'text' as const,
+        text: typeof stroke.text === 'string' ? stroke.text : '',
+        x: Number(stroke.x),
+        y: Number(stroke.y),
+        width: Number(stroke.width),
+        height: Number(stroke.height),
+        rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
+        fontSize: Number.isFinite(Number(stroke.fontSize)) ? Number(stroke.fontSize) : 28,
+        color: typeof stroke.color === 'string' ? stroke.color : '#202124',
+        page: row.page ?? 0,
+      }
+      if (!text.text || !Number.isFinite(text.x) || !Number.isFinite(text.y) || !Number.isFinite(text.width) || !Number.isFinite(text.height)) return null
+      return text
     }
 
     if (!Array.isArray(stroke.points) || stroke.points.length < 2) return null
