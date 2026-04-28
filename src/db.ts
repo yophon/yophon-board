@@ -137,12 +137,42 @@ export function createStroke(
   ).get(Number(result.lastInsertRowid)) as StrokeRow;
 }
 
+export function updateStroke(
+  db: Database,
+  boardId: number,
+  id: number,
+  page: number,
+  strokeData: string,
+): StrokeRow | null {
+  const result = db.run(
+    "UPDATE strokes SET stroke_data = ? WHERE board_id = ? AND id = ? AND page = ?",
+    [strokeData.trim().slice(0, 20000), boardId, id, page],
+  );
+  if (result.changes <= 0) return null;
+  return db.query(
+    "SELECT id, board_id, page, client_id, local_id, stroke_data, created_at FROM strokes WHERE id = ?",
+  ).get(id) as StrokeRow;
+}
+
 export function deleteOwnStroke(db: Database, boardId: number, id: number, page: number, clientId: string): boolean {
   const result = db.run(
     "DELETE FROM strokes WHERE board_id = ? AND id = ? AND page = ? AND client_id = ?",
     [boardId, id, page, clientId.slice(0, 80)],
   );
   return result.changes > 0;
+}
+
+export function deleteStrokes(db: Database, boardId: number, page: number, ids: number[]): number[] {
+  const deleted: number[] = [];
+  const statement = db.prepare("DELETE FROM strokes WHERE board_id = ? AND id = ? AND page = ?");
+  const transaction = db.transaction((strokeIds: number[]) => {
+    for (const id of strokeIds) {
+      const result = statement.run(boardId, id, page);
+      if (result.changes > 0) deleted.push(id);
+    }
+  });
+  transaction(ids);
+  return deleted;
 }
 
 export function clearBoardPage(db: Database, boardId: number, page: number): void {

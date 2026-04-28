@@ -12,6 +12,7 @@ export const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
 export const STROKE_MAX_BYTES = 20000;
 export const STROKE_MAX_POINTS = 1000;
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
 export const serverConfig = {
   port: Number(process.env.PORT || 3020),
@@ -19,4 +20,5 @@ export const serverConfig = {
   appOrigin: process.env.APP_ORIGIN,
   cookieSecure: process.env.COOKIE_SECURE,
   distDir: existsSync("frontend/dist") ? "frontend/dist" : "public",
+  assetDir: process.env.ASSET_DIR || "data/assets",
 };

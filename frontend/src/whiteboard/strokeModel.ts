@@ -14,6 +14,21 @@ export function getCenter(a: Point, b: Point): Point {
 }
 
 export function createLocalStroke(stroke: StrokeData, page: number): CanvasStroke {
+  if (stroke.type === 'image') {
+    return {
+      type: 'image',
+      src: stroke.src,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      mime: stroke.mime,
+      page,
+      localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    }
+  }
+
   return {
     points: simplifyPoints(stroke.points, stroke.width),
     color: stroke.color,
@@ -27,6 +42,19 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
 }
 
 export function persistableStroke(stroke: StrokeData): StrokeData {
+  if (stroke.type === 'image') {
+    return {
+      type: 'image',
+      src: stroke.src,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      mime: stroke.mime,
+    }
+  }
+
   return {
     points: stroke.points,
     color: stroke.color,
@@ -40,6 +68,24 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
 export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
   try {
     const stroke = JSON.parse(row.stroke_data) as StrokeData
+    if (stroke.type === 'image') {
+      const image = {
+        id: row.id,
+        created_at: row.created_at,
+        type: 'image' as const,
+        src: typeof stroke.src === 'string' ? stroke.src : '',
+        x: Number(stroke.x),
+        y: Number(stroke.y),
+        width: Number(stroke.width),
+        height: Number(stroke.height),
+        rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
+        mime: typeof stroke.mime === 'string' ? stroke.mime : undefined,
+        page: row.page ?? 0,
+      }
+      if (!image.src || !Number.isFinite(image.x) || !Number.isFinite(image.y) || !Number.isFinite(image.width) || !Number.isFinite(image.height)) return null
+      return image
+    }
+
     if (!Array.isArray(stroke.points) || stroke.points.length < 2) return null
     if (stroke.tool !== 'pen' && stroke.tool !== 'eraser') return null
     return {

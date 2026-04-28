@@ -31,17 +31,35 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
   try {
     const pending = strokes
       .filter(stroke => !stroke.id && (stroke.failed || stroke.pending))
-      .map(stroke => ({
-        points: stroke.points,
-        color: stroke.color,
-        width: stroke.width,
-        tool: stroke.tool,
-        opacity: stroke.opacity,
-        blend: stroke.blend,
-        page: stroke.page,
-        localId: stroke.localId,
-        retryCount: stroke.retryCount,
-      }))
+      .map(stroke => {
+        if (stroke.type === 'image') {
+          return {
+            type: 'image' as const,
+            src: stroke.src,
+            x: stroke.x,
+            y: stroke.y,
+            width: stroke.width,
+            height: stroke.height,
+            rotation: stroke.rotation,
+            mime: stroke.mime,
+            page: stroke.page,
+            localId: stroke.localId,
+            retryCount: stroke.retryCount,
+          }
+        }
+
+        return {
+          points: stroke.points,
+          color: stroke.color,
+          width: stroke.width,
+          tool: stroke.tool,
+          opacity: stroke.opacity,
+          blend: stroke.blend,
+          page: stroke.page,
+          localId: stroke.localId,
+          retryCount: stroke.retryCount,
+        }
+      })
     if (pending.length === 0) localStorage.removeItem(PENDING_STORAGE_KEY)
     else localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ boardSlug, strokes: pending }))
   } catch {

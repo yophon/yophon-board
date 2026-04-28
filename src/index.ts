@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { cors } from "@elysiajs/cors";
+import { saveImageAsset, serveImageAsset } from "./assets";
 import {
   INTERNAL_REMOTE_IP_HEADER,
   LOGIN_RATE_LIMIT_MAX,
@@ -15,6 +16,7 @@ import {
   createStroke,
   deleteAdminSession,
   deleteOwnStroke,
+  deleteStrokes,
   ensureBoard,
   getBoard,
   getDbStats,
@@ -22,6 +24,7 @@ import {
   initDb,
   listBoards,
   normalizeSlug,
+  updateStroke,
   updateAdminPassword,
   validateAdminSession,
   verifyAdminPassword,
@@ -97,6 +100,35 @@ function saveProjectStroke(slug: string, body: unknown, request: Request, cookie
   return publicRow;
 }
 
+async function uploadProjectAsset(slug: string, request: Request) {
+  const clientKey = getClientKey(request);
+  if (writeLimiter.hit(`asset:${clientKey}`)) {
+    return tooManyRequests("提交过于频繁，请稍后再试");
+  }
+
+  const form = await request.formData();
+  const image = form.get("image");
+  if (!(image instanceof File)) return badRequest("缺少图片文件");
+
+  const board = ensureBoard(db, slug);
+  try {
+    return await saveImageAsset(board.slug, image);
+  } catch (error) {
+    if ((error as Error).message === "INVALID_IMAGE_TYPE") return badRequest("仅支持 PNG、JPEG、WebP、GIF 图片");
+    if ((error as Error).message === "IMAGE_TOO_LARGE") return badRequest("图片不能超过 5MB");
+    throw error;
+  }
+}
+
+function getProjectAsset(slug: string, assetId: string) {
+  const board = getBoard(db, slug);
+  if (!board) return new Response(JSON.stringify({ error: "白板不存在" }), {
+    status: 404,
+    headers: { "Content-Type": "application/json" },
+  });
+  return serveImageAsset(board.slug, assetId);
+}
+
 function deleteOwnProjectStroke(slug: string, strokeId: string, query: Record<string, unknown>, request: Request, cookie: CookieJar) {
   const board = getBoard(db, slug);
   if (!board) return badRequest("白板不存在");
@@ -108,6 +140,48 @@ function deleteOwnProjectStroke(slug: string, strokeId: string, query: Record<st
   if (!deleted) return badRequest("无法撤销此笔画");
   boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
   return { ok: true };
+}
+
+function eraseProjectStrokes(slug: string, body: unknown, request: Request) {
+  const clientKey = getClientKey(request);
+  if (writeLimiter.hit(`erase:${clientKey}`)) {
+    return tooManyRequests("提交过于频繁，请稍后再试");
+  }
+
+  const board = getBoard(db, slug);
+  if (!board) return badRequest("白板不存在");
+  const page = parsePage((body as { page?: number }).page);
+  const ids = Array.from(new Set(((body as { ids?: unknown[] }).ids || [])
+    .map(id => Number(id))
+    .filter(id => Number.isInteger(id) && id > 0)
+    .slice(0, 100)));
+  if (ids.length === 0) return { ok: true, deleted_ids: [] };
+
+  const deleted = deleteStrokes(db, board.id, page, ids);
+  for (const id of deleted) {
+    boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
+  }
+  return { ok: true, deleted_ids: deleted };
+}
+
+function updateProjectStroke(slug: string, strokeId: string, body: unknown, query: Record<string, unknown>, request: Request) {
+  const clientKey = getClientKey(request);
+  if (writeLimiter.hit(`update:${clientKey}`)) {
+    return tooManyRequests("提交过于频繁，请稍后再试");
+  }
+
+  const board = getBoard(db, slug);
+  if (!board) return badRequest("白板不存在");
+  const id = parseId(strokeId);
+  const page = parsePage((body as { page?: number }).page ?? query.page);
+  const normalized = normalizeStrokeData((body as { stroke_data?: string }).stroke_data || "");
+  if (!normalized.ok) return badRequest(normalized.message);
+
+  const row = updateStroke(db, board.id, id, page, normalized.value);
+  if (!row) return badRequest("无法更新此元素");
+  const publicRow = toPublicStroke(row);
+  boardHub.broadcast(board.slug, { type: "stroke-updated", stroke: publicRow, page });
+  return publicRow;
 }
 
 function clearProjectPage(slug: string, query: Record<string, unknown>) {
@@ -150,6 +224,8 @@ const app = new Elysia()
   .get("/api/health", () => ({ ok: true }))
   .get("/api/projects", () => listProjects())
   .get("/api/projects/:slug", ({ params }) => getOrCreateProject(params.slug))
+  .get("/api/projects/:slug/assets/:assetId", ({ params }) => getProjectAsset(params.slug, params.assetId))
+  .post("/api/projects/:slug/assets", ({ params, request }) => uploadProjectAsset(params.slug, request))
   .get("/api/projects/:slug/strokes", ({ params, query }) => listProjectStrokes(params.slug, query))
   .post("/api/projects/:slug/strokes", ({ params, body, request, cookie }) => {
     return saveProjectStroke(params.slug, body, request, cookie);
@@ -161,8 +237,24 @@ const app = new Elysia()
       page: t.Optional(t.Number()),
     }),
   })
+  .post("/api/projects/:slug/strokes/erase", ({ params, body, request }) => {
+    return eraseProjectStrokes(params.slug, body, request);
+  }, {
+    body: t.Object({
+      ids: t.Array(t.Number()),
+      page: t.Optional(t.Number()),
+    }),
+  })
   .delete("/api/projects/:slug/strokes/:id", ({ params, query, request, cookie }) => {
     return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
+  })
+  .patch("/api/projects/:slug/strokes/:id", ({ params, body, query, request }) => {
+    return updateProjectStroke(params.slug, params.id, body, query, request);
+  }, {
+    body: t.Object({
+      stroke_data: t.String(),
+      page: t.Optional(t.Number()),
+    }),
   })
   .delete("/api/projects/:slug/strokes", ({ params, query, cookie, set }) => {
     if (!isAuthed(cookie)) {
@@ -189,6 +281,8 @@ const app = new Elysia()
   .get("/api/boards/:slug", ({ params }) => {
     return getOrCreateProject(params.slug);
   })
+  .get("/api/boards/:slug/assets/:assetId", ({ params }) => getProjectAsset(params.slug, params.assetId))
+  .post("/api/boards/:slug/assets", ({ params, request }) => uploadProjectAsset(params.slug, request))
   .post("/api/boards", ({ body, cookie, set }) => {
     if (!isAuthed(cookie)) {
       set.status = 401;
@@ -292,8 +386,24 @@ const app = new Elysia()
       page: t.Optional(t.Number()),
     }),
   })
+  .post("/api/boards/:slug/strokes/erase", ({ params, body, request }) => {
+    return eraseProjectStrokes(params.slug, body, request);
+  }, {
+    body: t.Object({
+      ids: t.Array(t.Number()),
+      page: t.Optional(t.Number()),
+    }),
+  })
   .delete("/api/boards/:slug/strokes/:id", ({ params, query, request, cookie }) => {
     return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
+  })
+  .patch("/api/boards/:slug/strokes/:id", ({ params, body, query, request }) => {
+    return updateProjectStroke(params.slug, params.id, body, query, request);
+  }, {
+    body: t.Object({
+      stroke_data: t.String(),
+      page: t.Optional(t.Number()),
+    }),
   })
   .delete("/api/boards/:slug/strokes", ({ params, query, cookie, set }) => {
     if (!isAuthed(cookie)) {

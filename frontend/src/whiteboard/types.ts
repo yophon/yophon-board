@@ -3,7 +3,8 @@ export interface Point {
   y: number
 }
 
-export interface StrokeData {
+export interface DrawingStrokeData {
+  type?: 'stroke'
   points: Point[]
   color: string
   width: number
@@ -12,7 +13,20 @@ export interface StrokeData {
   blend?: 'normal' | 'multiply'
 }
 
-export interface CanvasStroke extends StrokeData {
+export interface ImageElementData {
+  type: 'image'
+  src: string
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation?: number
+  mime?: string
+}
+
+export type StrokeData = DrawingStrokeData | ImageElementData
+
+export type CanvasStroke = StrokeData & {
   id?: number
   localId?: string
   created_at?: number
@@ -21,6 +35,13 @@ export interface CanvasStroke extends StrokeData {
   failed?: boolean
   retryCount?: number
   retryTimer?: number
+}
+
+export interface UploadedImageAsset {
+  asset_id: string
+  url: string
+  mime: string
+  size: number
 }
 
 export interface StrokeRow {
@@ -35,5 +56,6 @@ export type WsState = 'offline' | 'connecting' | 'online'
 export type WhiteboardWsMessage =
   | { type: 'connected' }
   | { type: 'stroke-created'; stroke: StrokeRow; local_id?: string; page?: number }
+  | { type: 'stroke-updated'; stroke: StrokeRow; page?: number }
   | { type: 'stroke-deleted'; id: number; page?: number }
   | { type: 'strokes-cleared'; page?: number }

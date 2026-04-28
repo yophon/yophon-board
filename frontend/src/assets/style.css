@@ -305,6 +305,14 @@ button { border: 0; background: none; cursor: pointer; }
   display: block;
 }
 
+.wb-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .wb-toolbar {
   position: absolute;
   top: 12px;
@@ -414,6 +422,47 @@ button { border: 0; background: none; cursor: pointer; }
 .wb-tool-btn:disabled { cursor: not-allowed; opacity: .18; }
 .wb-alert-btn { opacity: 1; color: #a15d00; background: rgba(251,188,4,.16); }
 .wb-danger-btn { color: var(--color-danger); }
+
+.wb-tool-popover {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.wb-tool-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  min-width: 104px;
+  padding: 6px;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  box-shadow: var(--shadow-md);
+}
+
+.wb-tool-menu-item {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.wb-tool-menu-item:hover,
+.wb-tool-menu-item.active {
+  background: var(--color-hover);
+}
+
+.wb-eraser-menu {
+  top: 58px;
+  left: 50%;
+  transform: translateX(-50%);
+}
 
 .wb-toast {
   position: absolute;

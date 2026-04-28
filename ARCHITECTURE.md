@@ -9,6 +9,7 @@ Product terminology uses **projects**. Internally, the current persistence table
 - `src/index.ts`: application composition, routes, and server startup.
 - `src/db.ts`: SQLite schema and persistence operations.
 - `src/config.ts`: environment-derived configuration and shared runtime constants.
+- `src/assets.ts`: uploaded image asset validation, storage, and serving.
 - `src/http.ts`: request helpers, cookie helpers, parsers, and public response serializers.
 - `src/stroke.ts`: server-side stroke validation and normalization.
 - `src/rateLimit.ts`: reusable in-memory sliding-window limiter.
@@ -36,6 +37,7 @@ The current realtime model is single-process. If the app moves to multiple insta
 Add new frontend features by choosing the smallest stable layer:
 
 - New stroke fields or drawing modes: update `types.ts`, `strokeModel.ts`, backend `stroke.ts`, then the canvas controls.
+- New imported assets or element transforms: keep file storage in `assets.ts`; persist only small element metadata and transformed stroke data through the existing drawing save path.
 - New offline behavior: extend `pendingStorage.ts`.
 - New project/page metadata: keep API calls near the component first; promote to a composable once more than one view needs it.
 - New rendering feature such as layers, selections, or imported assets: introduce a whiteboard module before adding more state to `WhiteboardCanvas.vue`.
