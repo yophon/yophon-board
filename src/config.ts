@@ -13,6 +13,7 @@ export const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 export const STROKE_MAX_BYTES = 20000;
 export const STROKE_MAX_POINTS = 1000;
 export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+export const PDF_MAX_BYTES = 10 * 1024 * 1024;
 
 export const serverConfig = {
   port: Number(process.env.PORT || 3020),

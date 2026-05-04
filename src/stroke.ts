@@ -52,6 +52,73 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
     return { ok: true, value: normalizedImage };
   }
 
+  if (stroke?.type === "pdf") {
+    const src = typeof stroke.src === "string" ? stroke.src.trim() : "";
+    if (!/^\/api\/(?:projects|boards)\/[a-z0-9-]{1,63}\/assets\/[0-9a-f-]+\.pdf$/i.test(src)) {
+      return { ok: false, message: "PDF 地址不合法" };
+    }
+
+    const x = Number(stroke.x);
+    const y = Number(stroke.y);
+    const width = Number(stroke.width);
+    const height = Number(stroke.height);
+    const pageCount = Number(stroke.pageCount);
+    const pageGap = Number(stroke.pageGap ?? 24);
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !Number.isInteger(pageCount) ||
+      pageCount < 1 ||
+      pageCount > 200 ||
+      width < 32 ||
+      height < 32 ||
+      // PDFs can be tall (200 pages × 1100px ≈ 220k); cap generously.
+      width > 4096 ||
+      height > 320000 ||
+      !Number.isFinite(pageGap) ||
+      pageGap < 0 ||
+      pageGap > 200
+    ) {
+      return { ok: false, message: "PDF 尺寸不合法" };
+    }
+
+    // Per-page heights are optional metadata; without it the renderer
+    // treats every page as height/pageCount. When present we validate
+    // each entry is a positive number and the array length matches.
+    let pageHeights: number[] | undefined;
+    if (Array.isArray(stroke.pageHeights)) {
+      if (stroke.pageHeights.length !== pageCount) {
+        return { ok: false, message: "PDF 页面信息不一致" };
+      }
+      const heights: number[] = [];
+      for (const value of stroke.pageHeights) {
+        const h = Number(value);
+        if (!Number.isFinite(h) || h <= 0 || h > 6000) {
+          return { ok: false, message: "PDF 页面尺寸不合法" };
+        }
+        heights.push(Math.round(h * 100) / 100);
+      }
+      pageHeights = heights;
+    }
+
+    const normalizedPdf = JSON.stringify({
+      type: "pdf",
+      src,
+      x: Math.round(x * 100) / 100,
+      y: Math.round(y * 100) / 100,
+      width: Math.round(width * 100) / 100,
+      height: Math.round(height * 100) / 100,
+      rotation: normalizeRotation(stroke.rotation),
+      pageCount,
+      pageGap: Math.round(pageGap),
+      pageHeights,
+    });
+    if (normalizedPdf.length > STROKE_MAX_BYTES) return { ok: false, message: "涂鸦数据过大" };
+    return { ok: true, value: normalizedPdf };
+  }
+
   if (stroke?.type === "text") {
     const text = typeof stroke.text === "string" ? stroke.text.trim().slice(0, 2000) : "";
     if (!text) return { ok: false, message: "文本不能为空" };

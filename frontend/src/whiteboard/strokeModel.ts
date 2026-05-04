@@ -16,6 +16,23 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
     }
   }
 
+  if (stroke.type === 'pdf') {
+    return {
+      type: 'pdf',
+      src: stroke.src,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      pageCount: stroke.pageCount,
+      pageGap: stroke.pageGap,
+      pageHeights: [...stroke.pageHeights],
+      page,
+      localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    }
+  }
+
   if (stroke.type === 'text') {
     return {
       type: 'text',
@@ -58,6 +75,21 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       mime: stroke.mime,
+    }
+  }
+
+  if (stroke.type === 'pdf') {
+    return {
+      type: 'pdf',
+      src: stroke.src,
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      pageCount: stroke.pageCount,
+      pageGap: stroke.pageGap,
+      pageHeights: [...stroke.pageHeights],
     }
   }
 
@@ -107,6 +139,32 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
       }
       if (!image.src || !Number.isFinite(image.x) || !Number.isFinite(image.y) || !Number.isFinite(image.width) || !Number.isFinite(image.height)) return null
       return image
+    }
+
+    if (stroke.type === 'pdf') {
+      const pageCount = Number(stroke.pageCount)
+      if (!Number.isInteger(pageCount) || pageCount < 1) return null
+      const heights = Array.isArray(stroke.pageHeights)
+        ? stroke.pageHeights.map((h: unknown) => Number(h))
+        : []
+      if (heights.length !== pageCount || heights.some(h => !Number.isFinite(h) || h <= 0)) return null
+      const pdf = {
+        id: row.id,
+        created_at: row.created_at,
+        type: 'pdf' as const,
+        src: typeof stroke.src === 'string' ? stroke.src : '',
+        x: Number(stroke.x),
+        y: Number(stroke.y),
+        width: Number(stroke.width),
+        height: Number(stroke.height),
+        rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
+        pageCount,
+        pageGap: Number.isFinite(Number(stroke.pageGap)) ? Number(stroke.pageGap) : 24,
+        pageHeights: heights,
+        page: row.page ?? 0,
+      }
+      if (!pdf.src || !Number.isFinite(pdf.x) || !Number.isFinite(pdf.y) || !Number.isFinite(pdf.width) || !Number.isFinite(pdf.height)) return null
+      return pdf
     }
 
     if (stroke.type === 'text') {

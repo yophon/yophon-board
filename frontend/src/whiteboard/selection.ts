@@ -10,7 +10,8 @@ import type { CanvasStroke, Point, StrokeData } from './types'
 
 export type ImageStroke = Extract<CanvasStroke, { type: 'image' }>
 export type TextStroke = Extract<CanvasStroke, { type: 'text' }>
-export type RectElementStroke = ImageStroke | TextStroke
+export type PdfStroke = Extract<CanvasStroke, { type: 'pdf' }>
+export type RectElementStroke = ImageStroke | TextStroke | PdfStroke
 export type DrawingStroke = Extract<CanvasStroke, { points: Point[] }>
 export type TransformMode = 'move' | 'resize-n' | 'resize-ne' | 'resize-e' | 'resize-se' | 'resize-s' | 'resize-sw' | 'resize-w' | 'resize-nw' | 'rotate'
 
@@ -45,7 +46,7 @@ export function isDrawingStroke(element: CanvasStroke | StrokeData): element is 
 }
 
 export function isRectElement(element: CanvasStroke | StrokeData): element is RectElementStroke {
-  return element.type === 'image' || element.type === 'text'
+  return element.type === 'image' || element.type === 'text' || element.type === 'pdf'
 }
 
 export function cloneElement(element: CanvasStroke): CanvasStroke {

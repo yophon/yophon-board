@@ -68,6 +68,24 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
           }
         }
 
+        if (stroke.type === 'pdf') {
+          return {
+            type: 'pdf' as const,
+            src: stroke.src,
+            x: stroke.x,
+            y: stroke.y,
+            width: stroke.width,
+            height: stroke.height,
+            rotation: stroke.rotation,
+            pageCount: stroke.pageCount,
+            pageGap: stroke.pageGap,
+            pageHeights: stroke.pageHeights,
+            page: stroke.page,
+            localId: stroke.localId,
+            retryCount: stroke.retryCount,
+          }
+        }
+
         return {
           points: stroke.points,
           color: stroke.color,

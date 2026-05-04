@@ -1,6 +1,7 @@
 <template>
   <div class="whiteboard-wrap" :class="{ 'web-fullscreen': isWebFullscreen }" ref="wrapRef">
     <input ref="fileInputRef" class="wb-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="onImageFileChange" />
+    <input ref="pdfInputRef" class="wb-file-input" type="file" accept="application/pdf" @change="onPdfFileChange" />
     <canvas
       ref="canvasRef"
       :style="{ cursor: canvasCursor }"
@@ -174,6 +175,9 @@
       <button class="wb-tool-btn" @click="chooseImage" title="添加图片">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 15-5-5L5 19"/></svg>
       </button>
+      <button class="wb-tool-btn" @click="choosePdf" title="添加 PDF">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M9 13h.5"/><path d="M14 13h1"/><path d="M9 17h6"/></svg>
+      </button>
       <button class="wb-tool-btn" :class="{ active: currentTool === 'text' }" @click="insertText" title="添加文本">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14"/><path d="M12 5v14"/><path d="M8 19h8"/></svg>
       </button>
@@ -226,6 +230,8 @@ import {
 } from '../whiteboard/geometry'
 import { ensureLegacyClientId, loadPendingStrokes, savePendingStrokes } from '../whiteboard/pendingStorage'
 import { drawStrokes } from '../whiteboard/renderer'
+import type { PdfCache } from '../whiteboard/pdfRenderer'
+import { probePdf } from '../whiteboard/pdfRenderer'
 import {
   applyElementTransform,
   cloneElement,
@@ -284,6 +290,7 @@ const props = withDefaults(defineProps<{
 const canvasRef = ref<HTMLCanvasElement>()
 const miniMapRef = ref<HTMLCanvasElement>()
 const fileInputRef = ref<HTMLInputElement>()
+const pdfInputRef = ref<HTMLInputElement>()
 const textEditorRef = ref<HTMLTextAreaElement>()
 const textToolbarRef = ref<HTMLDivElement>()
 const wrapRef = ref<HTMLDivElement>()
@@ -330,6 +337,7 @@ const pendingEraseIds = new Set<number>()
 const pendingEraseUpdateKeys = new Set<string>()
 const erasedPendingKeys = new Set<string>()
 const imageCache = new Map<string, HTMLImageElement | 'loading' | 'error'>()
+const pdfCache: PdfCache = new Map()
 
 const paletteColors = ['#202124', '#ea4335', '#4285f4', '#34a853']
 
@@ -597,7 +605,7 @@ function renderFrame() {
   ctx.translate(offsetX.value, offsetY.value)
   ctx.scale(scale.value, scale.value)
 
-  drawStrokes(ctx, allToDraw, { imageCache, scheduleRender })
+  drawStrokes(ctx, allToDraw, { imageCache, pdfCache, scheduleRender })
   drawSelectedElementOverlay(ctx)
   drawSelectionBox(ctx)
   ctx.restore()
@@ -1140,22 +1148,53 @@ function onImageFileChange(e: Event) {
   input.value = ''
 }
 
+function onPdfFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = firstPdfFile(input.files)
+  if (file) void addPdfFile(file)
+  input.value = ''
+}
+
 function onImageDrop(e: DragEvent) {
-  const file = firstImageFile(e.dataTransfer?.files || null)
-  if (!file) return
-  void addImageFile(file)
+  // Reuses the image-drop handler for PDFs too — the canvas only has
+  // one drop zone, so we sniff the file type and route accordingly.
+  const files = e.dataTransfer?.files || null
+  const pdf = firstPdfFile(files)
+  if (pdf) {
+    void addPdfFile(pdf)
+    return
+  }
+  const image = firstImageFile(files)
+  if (!image) return
+  void addImageFile(image)
 }
 
 function onPaste(e: ClipboardEvent) {
-  const file = firstImageFile(e.clipboardData?.files || null)
-  if (!file) return
+  const files = e.clipboardData?.files || null
+  const pdf = firstPdfFile(files)
+  if (pdf) {
+    e.preventDefault()
+    void addPdfFile(pdf)
+    return
+  }
+  const image = firstImageFile(files)
+  if (!image) return
   e.preventDefault()
-  void addImageFile(file)
+  void addImageFile(image)
 }
 
 function firstImageFile(files: FileList | null): File | null {
   if (!files) return null
   return Array.from(files).find(file => file.type.startsWith('image/')) || null
+}
+
+function firstPdfFile(files: FileList | null): File | null {
+  if (!files) return null
+  return Array.from(files).find(file => file.type === 'application/pdf') || null
+}
+
+function choosePdf() {
+  pdfInputRef.value?.click()
 }
 
 async function addImageFile(file: File) {
@@ -1213,6 +1252,91 @@ async function uploadImageAsset(file: File): Promise<UploadedImageAsset> {
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
+}
+
+async function uploadPdfAsset(file: File): Promise<UploadedImageAsset> {
+  // Same endpoint, different form key. Server inspects the field name
+  // to pick the asset kind (size cap and allowed mime types).
+  const form = new FormData()
+  form.append('pdf', file)
+  const res = await fetch(`/api/projects/${props.boardSlug}/assets`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  if (!res.ok) {
+    let message = `${res.status}`
+    try {
+      const data = await res.json() as { error?: string }
+      if (data.error) message = data.error
+    } catch { /* ignore */ }
+    throw new Error(message)
+  }
+  return res.json()
+}
+
+async function addPdfFile(file: File) {
+  if (file.type !== 'application/pdf') return
+  if (file.size > 10 * 1024 * 1024) {
+    saveError.value = 'PDF 不能超过 10MB'
+    return
+  }
+
+  saveError.value = 'PDF 解析中'
+  try {
+    // Probe locally first so we know page count + dimensions BEFORE
+    // committing to a network upload. A corrupt PDF fails fast here.
+    const arrayBuffer = await file.arrayBuffer()
+    const metadata = await probePdf(arrayBuffer.slice(0))
+    saveError.value = 'PDF 上传中'
+    const asset = await uploadPdfAsset(file)
+
+    const PAGE_GAP = 24
+    // Cap on-canvas width so a giant PDF doesn't dominate the viewport.
+    // Renderer will still upscale the rendered canvases to match.
+    const canvas = canvasRef.value
+    const rect = canvas?.getBoundingClientRect()
+    const viewportWidth = (rect?.width || 800) / scale.value
+    const fitScale = Math.min(1, (viewportWidth * 0.7) / metadata.pageWidth)
+    const width = Math.max(120, metadata.pageWidth * fitScale)
+    const heightScale = width / metadata.pageWidth
+    const pageHeights = metadata.pageHeights.map(h => h * heightScale)
+    const totalHeight = pageHeights.reduce((sum, h) => sum + h, 0)
+      + Math.max(0, metadata.pageCount - 1) * PAGE_GAP
+
+    const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
+    const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
+    // Anchor near top-left of viewport so a tall PDF reads naturally
+    // (top of page 1 at user's eye level rather than centered vertically).
+    const x = centerX - width / 2
+    const y = centerY - Math.min(totalHeight, ((rect?.height || 600) * 0.45) / scale.value)
+
+    const pdfElement = createLocalStroke({
+      type: 'pdf',
+      src: asset.url,
+      x,
+      y,
+      width,
+      height: totalHeight,
+      rotation: 0,
+      pageCount: metadata.pageCount,
+      pageGap: PAGE_GAP,
+      pageHeights,
+    }, currentPage.value)
+
+    allStrokes.value.push(pdfElement)
+    localUndoStack.value.push(pdfElement)
+    setTool('select')
+    selectedElementKeys.value = [elementKey(pdfElement)]
+    void saveStroke(pdfElement)
+    saveError.value = `PDF 已添加 (${metadata.pageCount} 页)`
+    window.setTimeout(() => {
+      if (saveError.value.startsWith('PDF 已添加')) saveError.value = ''
+    }, 1800)
+    renderFrame()
+  } catch (err) {
+    saveError.value = `添加 PDF 失败：${(err as Error).message || '未知错误'}`
+  }
 }
 
 async function readImageSize(file: File): Promise<{ width: number; height: number }> {
@@ -1297,7 +1421,7 @@ function renderMiniMap() {
   ctx.save()
   ctx.translate(ox - bounds.minX * mapScale, oy - bounds.minY * mapScale)
   ctx.scale(mapScale, mapScale)
-  drawStrokes(ctx, allStrokes.value, { imageCache, scheduleRender })
+  drawStrokes(ctx, allStrokes.value, { imageCache, pdfCache, scheduleRender })
   ctx.restore()
 
   const view = getViewportWorldBounds()

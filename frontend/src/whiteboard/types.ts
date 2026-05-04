@@ -24,6 +24,28 @@ export interface ImageElementData {
   mime?: string
 }
 
+export interface PdfElementData {
+  type: 'pdf'
+  src: string
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation?: number
+  pageCount: number
+  /**
+   * Gap (in world units) between consecutive PDF pages inside the
+   * element bounds. Each gap doubles as an annotation strip — strokes
+   * drawn there visually live "between pages".
+   */
+  pageGap: number
+  /**
+   * Per-page heights (world units) AFTER scaling all pages to the
+   * element's full width. Sum of heights + gaps equals `height`.
+   */
+  pageHeights: number[]
+}
+
 export interface TextElementData {
   type: 'text'
   text: string
@@ -39,7 +61,7 @@ export interface TextElementData {
   italic?: boolean
 }
 
-export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData
+export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData | PdfElementData
 
 export type CanvasStroke = StrokeData & {
   id?: number
@@ -57,6 +79,8 @@ export interface UploadedImageAsset {
   url: string
   mime: string
   size: number
+  /** New backend tags assets by kind; older clients can default to "image". */
+  kind?: 'image' | 'pdf'
 }
 
 export interface StrokeRow {

@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 import { cors } from "@elysiajs/cors";
-import { saveImageAsset, serveImageAsset } from "./assets";
+import { saveAsset, serveAsset } from "./assets";
 import {
   INTERNAL_REMOTE_IP_HEADER,
   LOGIN_RATE_LIMIT_MAX,
@@ -108,15 +108,26 @@ async function uploadProjectAsset(slug: string, request: Request) {
   }
 
   const form = await request.formData();
-  const image = form.get("image");
-  if (!(image instanceof File)) return badRequest("缺少图片文件");
+  // Accept the legacy `image` key plus the generic `pdf` key. The form
+  // field name selects the asset kind; the file's mime type is
+  // re-validated against that kind in saveAsset.
+  const imageField = form.get("image");
+  const pdfField = form.get("pdf");
+  const file = pdfField instanceof File ? pdfField : imageField instanceof File ? imageField : null;
+  if (!file) return badRequest("缺少上传文件");
+  const kind: "pdf" | "image" = pdfField instanceof File ? "pdf" : "image";
 
   const board = ensureBoard(db, slug);
   try {
-    return await saveImageAsset(board.slug, image);
+    return await saveAsset(board.slug, file, kind);
   } catch (error) {
-    if ((error as Error).message === "INVALID_IMAGE_TYPE") return badRequest("仅支持 PNG、JPEG、WebP、GIF 图片");
-    if ((error as Error).message === "IMAGE_TOO_LARGE") return badRequest("图片不能超过 5MB");
+    const msg = (error as Error).message;
+    if (msg === "INVALID_ASSET_TYPE") {
+      return badRequest(kind === "pdf" ? "仅支持 PDF 文件" : "仅支持 PNG、JPEG、WebP、GIF 图片");
+    }
+    if (msg === "ASSET_TOO_LARGE") {
+      return badRequest(kind === "pdf" ? "PDF 不能超过 10MB" : "图片不能超过 5MB");
+    }
     throw error;
   }
 }
@@ -127,7 +138,7 @@ function getProjectAsset(slug: string, assetId: string) {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
-  return serveImageAsset(board.slug, assetId);
+  return serveAsset(board.slug, assetId);
 }
 
 function deleteOwnProjectStroke(slug: string, strokeId: string, query: Record<string, unknown>, request: Request, cookie: CookieJar) {
