@@ -46,7 +46,18 @@ let pdfjsModulePromise: Promise<typeof import('pdfjs-dist')> | null = null
  * Lazy-load pdfjs-dist + configure the worker. The worker is resolved
  * via `?url` so Vite emits a hashed asset and the import is async — the
  * pdfjs bundle (~300 KB) doesn't ship in the initial chunk.
+ *
+ * The `?v=N` query bumper is intentional: we initially shipped the
+ * worker file via a static handler that returned
+ * `Content-Type: application/octet-stream` for `.mjs`. Browsers cached
+ * that 200 response with `immutable; max-age=1y`, so even after we
+ * fixed the MIME type, every existing browser would keep refusing to
+ * import the worker. Appending a query string changes the cache key
+ * and forces a fresh fetch. Bump the constant if a future bad-cache
+ * episode happens.
  */
+const WORKER_CACHE_BUST = '2'
+
 async function loadPdfjs(): Promise<typeof import('pdfjs-dist')> {
   if (!pdfjsModulePromise) {
     pdfjsModulePromise = (async () => {
@@ -54,7 +65,8 @@ async function loadPdfjs(): Promise<typeof import('pdfjs-dist')> {
         import('pdfjs-dist'),
         import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
       ])
-      pdfjsLib.GlobalWorkerOptions.workerSrc = (workerUrl as { default: string }).default
+      const baseUrl = (workerUrl as { default: string }).default
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `${baseUrl}?v=${WORKER_CACHE_BUST}`
       return pdfjsLib
     })()
   }
