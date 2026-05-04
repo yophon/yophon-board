@@ -33,13 +33,20 @@ function isInsideRoot(root: string, filePath: string): boolean {
 function contentTypeFor(path: string): string {
   switch (extname(path)) {
     case ".html": return "text/html; charset=utf-8";
+    case ".mjs":
     case ".js": return "text/javascript; charset=utf-8";
+    case ".map":
+    case ".json": return "application/json; charset=utf-8";
     case ".css": return "text/css; charset=utf-8";
     case ".svg": return "image/svg+xml";
     case ".png": return "image/png";
     case ".jpg":
     case ".jpeg": return "image/jpeg";
     case ".webp": return "image/webp";
+    case ".gif": return "image/gif";
+    case ".woff2": return "font/woff2";
+    case ".woff": return "font/woff";
+    case ".ttf": return "font/ttf";
     default: return "application/octet-stream";
   }
 }
