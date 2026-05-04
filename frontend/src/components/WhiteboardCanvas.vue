@@ -272,6 +272,8 @@ import type {
 } from '../whiteboard/types'
 import { useWhiteboardSocket } from '../composables/useWhiteboardSocket'
 import { useWhiteboardFullscreen } from '../composables/useWhiteboardFullscreen'
+import { useWhiteboardViewport } from '../composables/useWhiteboardViewport'
+import { useWhiteboardTextEditor, type TextEditorCommit } from '../composables/useWhiteboardTextEditor'
 
 const props = withDefaults(defineProps<{
   boardSlug?: string
@@ -287,9 +289,20 @@ const textToolbarRef = ref<HTMLDivElement>()
 const wrapRef = ref<HTMLDivElement>()
 const authStore = useAuthStore()
 
-const offsetX = ref(0)
-const offsetY = ref(0)
-const scale = ref(1)
+const {
+  offsetX,
+  offsetY,
+  scale,
+  clientToWorld: screenToWorld,
+  clientToCanvas: screenToCanvas,
+  onWheel,
+  reset: resetView,
+  centerOnWorldPoint,
+  getViewportWorldBounds,
+} = useWhiteboardViewport({
+  canvasRef,
+  onChange: () => renderFrame(),
+})
 
 const isDrawing = ref(false)
 const isPanning = ref(false)
@@ -307,7 +320,6 @@ const spaceHeld = ref(false)
 const saveError = ref('')
 const retryTimer = ref<number | null>(null)
 const touchPointers = new Map<number, Point>()
-let textToolbarInteraction = false
 let frameRequest: number | null = null
 let unmounted = false
 let pinchDistance = 0
@@ -335,29 +347,36 @@ const eraserMenuOpen = ref(false)
 type WhiteboardTool = 'pen' | 'eraser' | 'drag' | 'select' | 'text'
 type EraserMode = 'mask' | 'delete' | 'cut'
 
-interface TextEditorState {
-  mode: 'new' | 'edit'
-  key?: string
-  text: string
-  x: number
-  y: number
-  width: number
-  height: number
-  rotation: number
-  fontSize: number
-  color: string
-  align: NonNullable<TextElementData['align']>
-  bold: boolean
-  italic: boolean
-}
-
 const selectedElementKeys = ref<string[]>([])
 const isElementTransforming = ref(false)
 const isBoxSelecting = ref(false)
 const selectionBoxStart = ref<Point | null>(null)
 const selectionBoxEnd = ref<Point | null>(null)
-const textEditor = ref<TextEditorState | null>(null)
 let elementTransform: ElementTransformState | null = null
+
+const {
+  editor: textEditor,
+  beginInsertion: beginTextInsertionState,
+  beginEdit: beginTextEditState,
+  focusEditor: focusTextEditor,
+  onInput: onTextEditorInput,
+  onKeyDown: onTextEditorKeyDown,
+  onBlur: onTextEditorBlur,
+  onToolbarFocusOut: onTextToolbarFocusOut,
+  startToolbarInteraction: startTextToolbarInteraction,
+  updateColor: updateTextEditorColor,
+  updateFontSize: updateTextEditorFontSize,
+  toggleStyle: toggleTextEditorStyle,
+  setAlign: setTextEditorAlign,
+  commit: commitTextEditor,
+  cancel: cancelTextEditor,
+} = useWhiteboardTextEditor({
+  textEditorRef,
+  textToolbarRef,
+  measureBox: (text, fontSize, width, bold, italic) => measureInsertedText(text, fontSize, width, bold, italic),
+  onCommit: applyTextEditorCommit,
+  onChange: () => renderFrame(),
+})
 
 // `connectSocket` returns the ref-backed `wsState` that templates and
 // computeds read; the actual connect/reconnect lifecycle lives in the
@@ -491,24 +510,6 @@ function onWidthInput(val: number) {
     currentWidth.value = val
   } else {
     updatePreset('width', val)
-  }
-}
-
-function screenToWorld(sx: number, sy: number): Point {
-  const rect = canvasRef.value!.getBoundingClientRect()
-  const cx = sx - rect.left
-  const cy = sy - rect.top
-  return {
-    x: (cx - offsetX.value) / scale.value,
-    y: (cy - offsetY.value) / scale.value,
-  }
-}
-
-function screenToCanvas(sx: number, sy: number): Point {
-  const rect = canvasRef.value!.getBoundingClientRect()
-  return {
-    x: sx - rect.left,
-    y: sy - rect.top,
   }
 }
 
@@ -1033,26 +1034,6 @@ async function flushPendingEraseChanges() {
   }
 }
 
-function onWheel(e: WheelEvent) {
-  const rect = canvasRef.value!.getBoundingClientRect()
-  const mx = e.clientX - rect.left
-  const my = e.clientY - rect.top
-  const factor = e.deltaY > 0 ? 0.9 : 1.1
-  const newScale = Math.max(0.1, Math.min(5, scale.value * factor))
-
-  offsetX.value = mx - (mx - offsetX.value) * (newScale / scale.value)
-  offsetY.value = my - (my - offsetY.value) * (newScale / scale.value)
-  scale.value = newScale
-  renderFrame()
-}
-
-function resetView() {
-  offsetX.value = 0
-  offsetY.value = 0
-  scale.value = 1
-  renderFrame()
-}
-
 function chooseImage() {
   fileInputRef.value?.click()
 }
@@ -1063,8 +1044,7 @@ function insertText() {
 
 function beginTextInsertion(point: Point) {
   const box = measureInsertedText()
-  textEditor.value = {
-    mode: 'new',
+  beginTextInsertionState({
     text: '',
     x: point.x,
     y: point.y,
@@ -1076,14 +1056,12 @@ function beginTextInsertion(point: Point) {
     align: 'left',
     bold: false,
     italic: false,
-  }
+  })
   selectedElementKeys.value = []
-  focusTextEditor()
 }
 
 function beginTextEdit(element: TextStroke) {
-  textEditor.value = {
-    mode: 'edit',
+  beginTextEditState({
     key: elementKey(element),
     text: element.text,
     x: element.x,
@@ -1096,146 +1074,48 @@ function beginTextEdit(element: TextStroke) {
     align: element.align ?? 'left',
     bold: element.bold ?? false,
     italic: element.italic ?? false,
-  }
-  focusTextEditor(true)
-}
-
-function focusTextEditor(selectAll = false) {
-  void nextTick(() => {
-    const input = textEditorRef.value
-    if (!input) return
-    input.focus()
-    if (selectAll) input.select()
   })
 }
 
-function onTextEditorInput(e: Event) {
-  const editor = textEditor.value
-  if (!editor) return
-  const input = e.target as HTMLTextAreaElement
-  editor.text = input.value
-  const measured = measureInsertedText(input.value, editor.fontSize, editor.width, editor.bold, editor.italic)
-  editor.height = Math.max(editor.height, measured.height)
-}
-
-function startTextToolbarInteraction() {
-  textToolbarInteraction = true
-  window.setTimeout(() => {
-    textToolbarInteraction = false
-  }, 0)
-}
-
-function onTextEditorBlur(e: FocusEvent) {
-  if (textToolbarInteraction || isTextEditorUiTarget(e.relatedTarget)) return
-  void commitTextEditor()
-}
-
-function onTextToolbarFocusOut(e: FocusEvent) {
-  if (isTextEditorUiTarget(e.relatedTarget)) return
-  void commitTextEditor()
-}
-
-function isTextEditorUiTarget(target: EventTarget | null) {
-  if (!(target instanceof Node)) return false
-  return !!textEditorRef.value?.contains(target) || !!textToolbarRef.value?.contains(target)
-}
-
-function updateTextEditorColor(color: string) {
-  if (!textEditor.value) return
-  textEditor.value.color = color
-  focusTextEditor()
-}
-
-function updateTextEditorFontSize(fontSize: number) {
-  const editor = textEditor.value
-  if (!editor || !Number.isFinite(fontSize)) return
-  editor.fontSize = clampTextFontSize(fontSize)
-  const measured = measureInsertedText(editor.text, editor.fontSize, editor.width, editor.bold, editor.italic)
-  editor.height = Math.max(36, measured.height)
-  focusTextEditor()
-}
-
-function toggleTextEditorStyle(style: 'bold' | 'italic') {
-  const editor = textEditor.value
-  if (!editor) return
-  editor[style] = !editor[style]
-  const measured = measureInsertedText(editor.text, editor.fontSize, editor.width, editor.bold, editor.italic)
-  editor.height = Math.max(editor.height, measured.height)
-  focusTextEditor()
-}
-
-function setTextEditorAlign(align: NonNullable<TextElementData['align']>) {
-  if (!textEditor.value) return
-  textEditor.value.align = align
-  focusTextEditor()
-}
-
-function onTextEditorKeyDown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelTextEditor()
-    return
-  }
-
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
-    void commitTextEditor()
-  }
-}
-
-function cancelTextEditor() {
-  textEditor.value = null
-  renderFrame()
-}
-
-async function commitTextEditor() {
-  const editor = textEditor.value
-  if (!editor) return
-  textEditor.value = null
-  const text = editor.text.trim()
-  if (!text) {
-    renderFrame()
-    return
-  }
-
-  const measured = measureInsertedText(text, editor.fontSize, editor.width, editor.bold, editor.italic)
-  const width = Math.max(editor.width, measured.width)
-  const height = Math.max(editor.height, measured.height)
-
-  if (editor.mode === 'edit' && editor.key) {
-    const element = allStrokes.value.find(stroke => elementKey(stroke) === editor.key)
+/**
+ * Persistence side of text editor commits. The composable handles open
+ * / type / commit-or-cancel; we just receive a finalized commit and
+ * either patch an existing text stroke or create a new one.
+ */
+async function applyTextEditorCommit(commit: TextEditorCommit) {
+  if (commit.mode === 'edit' && commit.key) {
+    const element = allStrokes.value.find(stroke => elementKey(stroke) === commit.key)
     if (element?.type === 'text') {
-      element.text = text
-      element.x = editor.x
-      element.y = editor.y
-      element.width = width
-      element.height = height
-      element.rotation = editor.rotation
-      element.fontSize = editor.fontSize
-      element.color = editor.color
-      element.align = editor.align
-      element.bold = editor.bold
-      element.italic = editor.italic
+      element.text = commit.text
+      element.x = commit.x
+      element.y = commit.y
+      element.width = commit.width
+      element.height = commit.height
+      element.rotation = commit.rotation
+      element.fontSize = commit.fontSize
+      element.color = commit.color
+      element.align = commit.align
+      element.bold = commit.bold
+      element.italic = commit.italic
       setSelectedElements([element])
       await saveElementTransform(element)
     }
-    renderFrame()
     return
   }
 
   const element = createLocalStroke({
     type: 'text',
-    text,
-    x: editor.x,
-    y: editor.y,
-    width,
-    height,
-    rotation: editor.rotation,
-    fontSize: editor.fontSize,
-    color: editor.color,
-    align: editor.align,
-    bold: editor.bold,
-    italic: editor.italic,
+    text: commit.text,
+    x: commit.x,
+    y: commit.y,
+    width: commit.width,
+    height: commit.height,
+    rotation: commit.rotation,
+    fontSize: commit.fontSize,
+    color: commit.color,
+    align: commit.align,
+    bold: commit.bold,
+    italic: commit.italic,
   }, currentPage.value)
 
   allStrokes.value.push(element)
@@ -1247,7 +1127,6 @@ async function commitTextEditor() {
   window.setTimeout(() => {
     if (saveError.value === '文本已添加') saveError.value = ''
   }, 1600)
-  renderFrame()
 }
 
 function measureInsertedText(text = '', fontSize = DEFAULT_TEXT_FONT_SIZE, width = DEFAULT_TEXT_WIDTH, bold = false, italic = false) {
@@ -1398,19 +1277,6 @@ function getStrokeBounds(strokes: StrokeData[]) {
   return { minX: minX - padding, minY: minY - padding, maxX: maxX + padding, maxY: maxY + padding }
 }
 
-function getViewportWorldBounds() {
-  const canvas = canvasRef.value
-  const rect = canvas?.getBoundingClientRect()
-  const width = rect?.width || 1
-  const height = rect?.height || 1
-  return {
-    minX: -offsetX.value / scale.value,
-    minY: -offsetY.value / scale.value,
-    maxX: (width - offsetX.value) / scale.value,
-    maxY: (height - offsetY.value) / scale.value,
-  }
-}
-
 function renderMiniMap() {
   const mini = miniMapRef.value
   if (!mini) return
@@ -1458,10 +1324,7 @@ function onMiniMapPointer(e: PointerEvent) {
   const oy = (mini.height - bh * mapScale) / 2
   const worldX = bounds.minX + ((e.clientX - rect.left) / rect.width * mini.width - ox) / mapScale
   const worldY = bounds.minY + ((e.clientY - rect.top) / rect.height * mini.height - oy) / mapScale
-  const canvasRect = canvas.getBoundingClientRect()
-  offsetX.value = canvasRect.width / 2 - worldX * scale.value
-  offsetY.value = canvasRect.height / 2 - worldY * scale.value
-  renderFrame()
+  centerOnWorldPoint({ x: worldX, y: worldY })
 }
 
 function scheduleResizeCanvas() {
