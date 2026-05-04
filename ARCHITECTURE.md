@@ -28,6 +28,8 @@ The current realtime model is single-process. If the app moves to multiple insta
 ## Frontend
 
 - `frontend/src/components/WhiteboardCanvas.vue`: UI wiring, pointer gestures, canvas rendering, and user commands.
+- `frontend/src/composables/useWhiteboardSocket.ts`: WebSocket connect / reconnect lifecycle. The canvas supplies `url()` and `onMessage`.
+- `frontend/src/composables/useWhiteboardFullscreen.ts`: web-fullscreen and native fullscreen state machine including the tap-vs-long-press handler.
 - `frontend/src/whiteboard/types.ts`: shared whiteboard domain types.
 - `frontend/src/whiteboard/strokeModel.ts`: stroke parsing, simplification, serialization, and saved-row application.
 - `frontend/src/whiteboard/pendingStorage.ts`: localStorage-backed unsaved stroke recovery.
@@ -51,5 +53,5 @@ Add new frontend features by choosing the smallest stable layer:
 ## Current Tradeoffs
 
 - There is no test suite yet; type checking and production build are the current guardrails.
-- `WhiteboardCanvas.vue` still owns pointer state, editor focus state, persistence calls, and command wiring. Rendering, text layout, geometry, eraser internals, and selection/transform math have been split into whiteboard modules.
+- `WhiteboardCanvas.vue` still owns pointer state, editor focus state, persistence calls, and command wiring. WebSocket connect/reconnect, fullscreen modes, rendering, text layout, geometry, eraser internals, and selection/transform math have been split into composables and whiteboard modules.
 - Project reads still create missing records for legacy shared links. If project permissions are added, make project creation an explicit admin action before adding private visibility rules.

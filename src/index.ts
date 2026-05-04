@@ -41,6 +41,7 @@ import {
   tooManyRequests,
   type CookieJar,
 } from "./http";
+import { logRequest } from "./log";
 import { SlidingWindowRateLimiter } from "./rateLimit";
 import { serveIndex, serveStaticAsset } from "./staticFiles";
 import { normalizeStrokeData } from "./stroke";
@@ -417,6 +418,7 @@ Bun.serve<BoardWsData>({
   hostname: serverConfig.host,
   port: serverConfig.port,
   async fetch(req, server) {
+    const start = Date.now();
     const headers = new Headers(req.headers);
     const remoteIp = server.requestIP(req)?.address;
     if (remoteIp) headers.set(INTERNAL_REMOTE_IP_HEADER, remoteIp);
@@ -431,7 +433,11 @@ Bun.serve<BoardWsData>({
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
-    if (url.pathname.startsWith("/api/")) return app.handle(request);
+    if (url.pathname.startsWith("/api/")) {
+      const response = await app.handle(request);
+      logRequest(request, response.status, start);
+      return response;
+    }
 
     const assetResponse = await serveStaticAsset(url.pathname, serverConfig.distDir);
     if (assetResponse) return assetResponse;

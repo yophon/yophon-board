@@ -269,8 +269,9 @@ import type {
   StrokeRow,
   UploadedImageAsset,
   WhiteboardWsMessage,
-  WsState,
 } from '../whiteboard/types'
+import { useWhiteboardSocket } from '../composables/useWhiteboardSocket'
+import { useWhiteboardFullscreen } from '../composables/useWhiteboardFullscreen'
 
 const props = withDefaults(defineProps<{
   boardSlug?: string
@@ -304,20 +305,11 @@ const currentWidth = ref(3)
 const currentTool = ref<WhiteboardTool>('pen')
 const spaceHeld = ref(false)
 const saveError = ref('')
-const wsState = ref<WsState>('offline')
 const retryTimer = ref<number | null>(null)
-const isFullscreen = ref(false)
-const isWebFullscreen = ref(false)
-const fullscreenPressTimer = ref<number | null>(null)
-const fullscreenLongPressHandled = ref(false)
 const touchPointers = new Map<number, Point>()
-let ws: WebSocket | null = null
-let reconnectTimer: number | null = null
 let textToolbarInteraction = false
-let reconnectAttempts = 0
 let frameRequest: number | null = null
 let unmounted = false
-let previousBodyOverflow = ''
 let pinchDistance = 0
 let pinchCenter: Point | null = null
 let pinchActive = false
@@ -326,7 +318,6 @@ const pendingEraseIds = new Set<number>()
 const pendingEraseUpdateKeys = new Set<string>()
 const erasedPendingKeys = new Set<string>()
 const imageCache = new Map<string, HTMLImageElement | 'loading' | 'error'>()
-const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000]
 
 const paletteColors = ['#202124', '#ea4335', '#4285f4', '#34a853']
 
@@ -367,6 +358,37 @@ const selectionBoxStart = ref<Point | null>(null)
 const selectionBoxEnd = ref<Point | null>(null)
 const textEditor = ref<TextEditorState | null>(null)
 let elementTransform: ElementTransformState | null = null
+
+// `connectSocket` returns the ref-backed `wsState` that templates and
+// computeds read; the actual connect/reconnect lifecycle lives in the
+// composable. Callbacks below are arrow functions so they pick up the
+// later-declared `handleSocketMessage` / `loadExistingStrokes` / etc. via
+// closure at the moment a message or open event fires.
+const { wsState, connect: connectSocket } = useWhiteboardSocket({
+  url: () => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}/api/projects/${props.boardSlug}/ws`
+  },
+  onOpen: () => {
+    void loadExistingStrokes(lastSyncedId.value > 0)
+    void flushPendingStrokes()
+  },
+  onMessage: (event) => handleSocketMessage(event),
+})
+
+const {
+  isFullscreen,
+  isWebFullscreen,
+  fullscreenTitle,
+  toggleFullscreen,
+  startFullscreenPress,
+  finishFullscreenPress,
+  cancelFullscreenPress,
+} = useWhiteboardFullscreen({
+  wrapRef,
+  onModeChange: () => scheduleResizeCanvas(),
+  onError: (message) => { saveError.value = message },
+})
 
 const failedCount = computed(() => allStrokes.value.filter(s => s.failed && !s.id).length)
 const canUndo = computed(() => localUndoStack.value.length > 0)
@@ -413,11 +435,6 @@ const statusMessage = computed(() => {
   if (saveError.value) return saveError.value
   if (wsState.value !== 'online') return '实时同步重连中'
   return ''
-})
-const fullscreenTitle = computed(() => {
-  if (isFullscreen.value) return '退出屏幕全屏'
-  if (isWebFullscreen.value) return '退出网页全屏'
-  return '网页全屏；长按进入屏幕全屏'
 })
 
 function selectPreset(i: number) {
@@ -1456,79 +1473,6 @@ function scheduleResizeCanvas() {
   })
 }
 
-function setWebFullscreen(next: boolean) {
-  if (isWebFullscreen.value === next) return
-
-  isWebFullscreen.value = next
-  if (next) {
-    previousBodyOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-  } else {
-    document.body.style.overflow = previousBodyOverflow
-  }
-  scheduleResizeCanvas()
-}
-
-function toggleWebFullscreen() {
-  setWebFullscreen(!isWebFullscreen.value)
-}
-
-async function toggleFullscreen() {
-  const wrap = wrapRef.value
-  if (!wrap) return
-
-  try {
-    if (document.fullscreenElement === wrap) {
-      await document.exitFullscreen()
-    } else {
-      setWebFullscreen(false)
-      await wrap.requestFullscreen()
-    }
-  } catch {
-    saveError.value = '全屏切换失败'
-  }
-}
-
-function onFullscreenChange() {
-  isFullscreen.value = document.fullscreenElement === wrapRef.value
-  scheduleResizeCanvas()
-}
-
-function startFullscreenPress() {
-  fullscreenLongPressHandled.value = false
-  fullscreenPressTimer.value = window.setTimeout(() => {
-    fullscreenLongPressHandled.value = true
-    fullscreenPressTimer.value = null
-    void toggleFullscreen()
-  }, 450)
-}
-
-function finishFullscreenPress() {
-  if (fullscreenPressTimer.value) {
-    window.clearTimeout(fullscreenPressTimer.value)
-    fullscreenPressTimer.value = null
-  }
-
-  if (fullscreenLongPressHandled.value) {
-    fullscreenLongPressHandled.value = false
-    return
-  }
-
-  if (isFullscreen.value) {
-    void toggleFullscreen()
-    return
-  }
-
-  toggleWebFullscreen()
-}
-
-function cancelFullscreenPress() {
-  if (fullscreenPressTimer.value) {
-    window.clearTimeout(fullscreenPressTimer.value)
-    fullscreenPressTimer.value = null
-  }
-}
-
 function resizeCanvas() {
   const canvas = canvasRef.value
   const wrap = wrapRef.value
@@ -1833,39 +1777,6 @@ function handleSocketMessage(event: MessageEvent) {
   }
 }
 
-function connectSocket() {
-  if (ws) {
-    ws.close()
-    ws = null
-  }
-  if (reconnectTimer) {
-    window.clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-
-  wsState.value = 'connecting'
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(`${protocol}//${window.location.host}/api/projects/${props.boardSlug}/ws`)
-
-  ws.onopen = () => {
-    wsState.value = 'online'
-    reconnectAttempts = 0
-    void loadExistingStrokes(lastSyncedId.value > 0)
-    void flushPendingStrokes()
-  }
-  ws.onmessage = handleSocketMessage
-  ws.onerror = () => {
-    wsState.value = 'offline'
-  }
-  ws.onclose = () => {
-    if (unmounted) return
-    wsState.value = 'offline'
-    const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)]
-    reconnectAttempts += 1
-    reconnectTimer = window.setTimeout(connectSocket, delay)
-  }
-}
-
 async function flushPendingStrokes() {
   const pending = allStrokes.value.filter(stroke => !stroke.id && stroke.failed)
   for (const stroke of pending) {
@@ -1886,7 +1797,6 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('paste', onPaste)
-  document.addEventListener('fullscreenchange', onFullscreenChange)
   await authStore.check()
 
   const restored = loadPendingStrokes(props.boardSlug).filter(stroke => (stroke.page ?? 0) === currentPage.value)
@@ -1902,19 +1812,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', onPaste)
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
-  if (reconnectTimer) window.clearTimeout(reconnectTimer)
   if (retryTimer.value) window.clearTimeout(retryTimer.value)
-  if (fullscreenPressTimer.value) window.clearTimeout(fullscreenPressTimer.value)
   if (frameRequest !== null) window.cancelAnimationFrame(frameRequest)
   for (const stroke of allStrokes.value) {
     if (stroke.retryTimer) {
       window.clearTimeout(stroke.retryTimer)
     }
   }
-  if (isWebFullscreen.value) {
-    document.body.style.overflow = previousBodyOverflow
-  }
-  if (ws) ws.close()
 })
 </script>
