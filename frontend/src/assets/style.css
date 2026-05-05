@@ -40,7 +40,8 @@ button, input { font: inherit; color: inherit; }
 button { border: 0; background: none; cursor: pointer; }
 
 .board-shell {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: grid;
   grid-template-rows: auto 1fr;
 }
@@ -203,11 +204,12 @@ button { border: 0; background: none; cursor: pointer; }
 .board-stage {
   min-height: 0;
   padding: 0 20px 20px;
+  display: flex;
 }
 
 .board-stage .whiteboard-wrap {
-  height: calc(100vh - 92px);
-  min-height: 520px;
+  flex: 1;
+  min-height: 0;
   border: var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -735,8 +737,6 @@ button { border: 0; background: none; cursor: pointer; }
   .board-stage { padding: 0 8px 8px; }
 
   .board-stage .whiteboard-wrap {
-    height: calc(100dvh - 72px);
-    min-height: 420px;
     border-radius: 12px;
   }
 
