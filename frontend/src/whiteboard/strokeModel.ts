@@ -17,17 +17,28 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
   }
 
   if (stroke.type === 'pdf') {
+    const pageCount = Math.max(1, stroke.pageCount)
+    const rawIndex = Number(stroke.currentPageIndex)
+    const currentPageIndex = Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < pageCount
+      ? rawIndex
+      : 0
+    const heights = [...stroke.pageHeights]
+    // Single-page mode: element height tracks the visible page. New
+    // PDFs are constructed this way; for an existing element we accept
+    // whatever caller gave us.
+    const height = heights[currentPageIndex] ?? stroke.height
     return {
       type: 'pdf',
       src: stroke.src,
       x: stroke.x,
       y: stroke.y,
       width: stroke.width,
-      height: stroke.height,
+      height,
       rotation: stroke.rotation ?? 0,
-      pageCount: stroke.pageCount,
+      pageCount,
       pageGap: stroke.pageGap,
-      pageHeights: [...stroke.pageHeights],
+      pageHeights: heights,
+      currentPageIndex,
       page,
       localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     }
@@ -90,6 +101,7 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       pageCount: stroke.pageCount,
       pageGap: stroke.pageGap,
       pageHeights: [...stroke.pageHeights],
+      currentPageIndex: stroke.currentPageIndex ?? 0,
     }
   }
 
@@ -148,6 +160,21 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
         ? stroke.pageHeights.map((h: unknown) => Number(h))
         : []
       if (heights.length !== pageCount || heights.some(h => !Number.isFinite(h) || h <= 0)) return null
+
+      // Legacy multi-page PDFs were saved with `height` equal to the
+      // sum of all page heights + gaps. Detect and migrate on load:
+      // if `currentPageIndex` isn't persisted, force single-page mode
+      // and resize the element to the first page so the renderer
+      // doesn't display a stretched-vertically page. Saving any
+      // transform after that overwrites the legacy height in DB.
+      const rawIndex = Number(stroke.currentPageIndex)
+      const hasIndex = Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < pageCount
+      const currentPageIndex = hasIndex ? rawIndex : 0
+      const persistedHeight = Number(stroke.height)
+      const height = hasIndex && Number.isFinite(persistedHeight)
+        ? persistedHeight
+        : heights[currentPageIndex]
+
       const pdf = {
         id: row.id,
         created_at: row.created_at,
@@ -156,11 +183,12 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
         x: Number(stroke.x),
         y: Number(stroke.y),
         width: Number(stroke.width),
-        height: Number(stroke.height),
+        height,
         rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
         pageCount,
         pageGap: Number.isFinite(Number(stroke.pageGap)) ? Number(stroke.pageGap) : 24,
         pageHeights: heights,
+        currentPageIndex,
         page: row.page ?? 0,
       }
       if (!pdf.src || !Number.isFinite(pdf.x) || !Number.isFinite(pdf.y) || !Number.isFinite(pdf.width) || !Number.isFinite(pdf.height)) return null

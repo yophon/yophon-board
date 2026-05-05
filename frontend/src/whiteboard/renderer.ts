@@ -119,33 +119,16 @@ function drawPdfElement(
   ctx.translate(pdf.x + pdf.width / 2, pdf.y + pdf.height / 2)
   ctx.rotate(rotation)
 
-  // Within element-local space the top-left corner is (-w/2, -h/2).
-  // Pages are stacked vertically with `pageGap` between them.
+  // Element-local top-left.
   const left = -pdf.width / 2
   const top = -pdf.height / 2
 
   if (entry.state === 'ready' && entry.metadata) {
-    let cursorY = top
-    for (let i = 0; i < pdf.pageCount; i++) {
-      const pageHeight = pdf.pageHeights[i] ?? pdf.height / pdf.pageCount
-      drawPdfPage(ctx, entry, i, left, cursorY, pdf.width, pageHeight, options.scheduleRender)
-      cursorY += pageHeight
-      if (i < pdf.pageCount - 1 && pdf.pageGap > 0) {
-        // Gap between pages: subtle dashed separator hints "annotation strip"
-        ctx.save()
-        ctx.fillStyle = 'rgba(247,248,245,0.7)'
-        ctx.fillRect(left, cursorY, pdf.width, pdf.pageGap)
-        ctx.strokeStyle = 'rgba(32,33,36,0.16)'
-        ctx.setLineDash([4, 4])
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(left + 6, cursorY + pdf.pageGap / 2)
-        ctx.lineTo(left + pdf.width - 6, cursorY + pdf.pageGap / 2)
-        ctx.stroke()
-        ctx.restore()
-        cursorY += pdf.pageGap
-      }
-    }
+    // Single-page mode: render exactly one page filling the element
+    // bounds. The host element is resized to that page's aspect when
+    // the user flips, so this stays geometrically correct.
+    const pageIndex = clampPageIndex(pdf.currentPageIndex ?? 0, pdf.pageCount)
+    drawPdfPage(ctx, entry, pageIndex, left, top, pdf.width, pdf.height, options.scheduleRender)
   } else {
     // Loading or error placeholder.
     ctx.fillStyle = entry.state === 'error' ? '#fae0e0' : '#f1f3ed'
@@ -167,6 +150,13 @@ function drawPdfElement(
   }
 
   ctx.restore()
+}
+
+function clampPageIndex(index: number, pageCount: number): number {
+  if (!Number.isFinite(index)) return 0
+  if (index < 0) return 0
+  if (index >= pageCount) return pageCount - 1
+  return Math.floor(index)
 }
 
 function drawPdfPage(

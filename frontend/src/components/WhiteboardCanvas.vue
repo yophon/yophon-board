@@ -63,6 +63,45 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16"/><path d="M9 12h11"/><path d="M4 18h16"/></svg>
       </button>
     </div>
+    <div
+      v-if="selectedPdfElement"
+      class="wb-pdf-pager"
+      :style="pdfPagerStyle"
+      @pointerdown.stop
+      @pointermove.stop
+      @pointerup.stop
+      @wheel.stop
+    >
+      <button
+        class="wb-pdf-pager-btn"
+        :disabled="(selectedPdfElement.currentPageIndex ?? 0) <= 0"
+        @click="pdfPagerPrev"
+        title="上一页"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+      <span class="wb-pdf-pager-label">
+        <input
+          class="wb-pdf-pager-input"
+          type="number"
+          min="1"
+          :max="selectedPdfElement.pageCount"
+          :value="(selectedPdfElement.currentPageIndex ?? 0) + 1"
+          @change="pdfPagerInput(($event.target as HTMLInputElement).value)"
+          @keydown.enter="pdfPagerInput(($event.target as HTMLInputElement).value)"
+          title="页码"
+        />
+        <span class="wb-pdf-pager-total">/ {{ selectedPdfElement.pageCount }}</span>
+      </span>
+      <button
+        class="wb-pdf-pager-btn"
+        :disabled="(selectedPdfElement.currentPageIndex ?? 0) >= selectedPdfElement.pageCount - 1"
+        @click="pdfPagerNext"
+        title="下一页"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </div>
     <canvas
       ref="miniMapRef"
       class="wb-minimap"
@@ -452,6 +491,31 @@ const textToolbarStyle = computed(() => {
     top: `${Math.max(8, offsetY.value + editor.y * scale.value - 42)}px`,
   }
 })
+
+// Pager overlay: shows up when exactly one PDF element is selected so
+// the user can flip pages without leaving the canvas. We re-derive
+// every render so it tracks pan/zoom + element resize without
+// imperative DOM math.
+const selectedPdfElement = computed(() => {
+  const elements = allStrokes.value.filter(s => selectedElementKeys.value.includes(elementKey(s)))
+  if (elements.length !== 1) return null
+  const only = elements[0]
+  return only.type === 'pdf' ? only : null
+})
+const pdfPagerStyle = computed(() => {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return {}
+  // Anchor below the element, centered horizontally. Stays inside the
+  // viewport even when the element is panned off the bottom.
+  const left = offsetX.value + (pdf.x + pdf.width / 2) * scale.value
+  const top = offsetY.value + (pdf.y + pdf.height) * scale.value + 10
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    transform: 'translateX(-50%)',
+  }
+})
+
 const wsTitle = computed(() => {
   if (wsState.value === 'online') return '实时同步已连接'
   if (wsState.value === 'connecting') return '实时同步连接中'
@@ -1301,15 +1365,15 @@ async function addPdfFile(file: File) {
     const width = Math.max(120, metadata.pageWidth * fitScale)
     const heightScale = width / metadata.pageWidth
     const pageHeights = metadata.pageHeights.map(h => h * heightScale)
-    const totalHeight = pageHeights.reduce((sum, h) => sum + h, 0)
-      + Math.max(0, metadata.pageCount - 1) * PAGE_GAP
+    // Single-page mode: element bounds match the first page. Flipping
+    // pages later resizes the element to the new page's height.
+    const initialHeight = pageHeights[0] ?? width
 
     const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
     const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
-    // Anchor near top-left of viewport so a tall PDF reads naturally
-    // (top of page 1 at user's eye level rather than centered vertically).
+    // Anchor near top of viewport so the page top reads naturally.
     const x = centerX - width / 2
-    const y = centerY - Math.min(totalHeight, ((rect?.height || 600) * 0.45) / scale.value)
+    const y = centerY - Math.min(initialHeight, ((rect?.height || 600) * 0.45) / scale.value)
 
     const pdfElement = createLocalStroke({
       type: 'pdf',
@@ -1317,11 +1381,12 @@ async function addPdfFile(file: File) {
       x,
       y,
       width,
-      height: totalHeight,
+      height: initialHeight,
       rotation: 0,
       pageCount: metadata.pageCount,
       pageGap: PAGE_GAP,
       pageHeights,
+      currentPageIndex: 0,
     }, currentPage.value)
 
     allStrokes.value.push(pdfElement)
@@ -1519,6 +1584,42 @@ async function saveStroke(stroke: CanvasStroke) {
     renderFrame()
     if (stroke.id && !stroke.failed && selectedElementKeys.value.includes(elementKey(stroke))) void saveElementTransform(stroke)
   }
+}
+
+// Flip a PDF element to a new page. Single-page mode: each page may
+// have its own aspect ratio so we resize the element height to match.
+// Persisted via the same PATCH path as a regular transform so other
+// clients see the flip.
+function setPdfPage(element: CanvasStroke, nextIndex: number) {
+  if (element.type !== 'pdf') return
+  const target = Math.max(0, Math.min(element.pageCount - 1, Math.floor(nextIndex)))
+  if (target === (element.currentPageIndex ?? 0)) return
+  element.currentPageIndex = target
+  const newHeight = element.pageHeights[target]
+  if (Number.isFinite(newHeight) && newHeight > 0) element.height = newHeight
+  renderFrame()
+  void saveElementTransform(element)
+}
+
+function pdfPagerPrev() {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) - 1)
+}
+
+function pdfPagerNext() {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) + 1)
+}
+
+function pdfPagerInput(value: string) {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  // User-facing pager is 1-based; data model is 0-based.
+  const oneBased = Number.parseInt(value, 10)
+  if (!Number.isFinite(oneBased)) return
+  setPdfPage(pdf, oneBased - 1)
 }
 
 async function saveElementTransform(element: CanvasStroke) {

@@ -80,6 +80,7 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
             pageCount: stroke.pageCount,
             pageGap: stroke.pageGap,
             pageHeights: stroke.pageHeights,
+            currentPageIndex: stroke.currentPageIndex,
             page: stroke.page,
             localId: stroke.localId,
             retryCount: stroke.retryCount,

@@ -103,6 +103,17 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       pageHeights = heights;
     }
 
+    // 0-based index of the page the client is showing. Optional for
+    // back-compat with rows written before single-page mode landed.
+    let currentPageIndex: number | undefined;
+    if (stroke.currentPageIndex !== undefined && stroke.currentPageIndex !== null) {
+      const raw = Number(stroke.currentPageIndex);
+      if (!Number.isInteger(raw) || raw < 0 || raw >= pageCount) {
+        return { ok: false, message: "PDF 当前页不合法" };
+      }
+      currentPageIndex = raw;
+    }
+
     const normalizedPdf = JSON.stringify({
       type: "pdf",
       src,
@@ -114,6 +125,7 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       pageCount,
       pageGap: Math.round(pageGap),
       pageHeights,
+      currentPageIndex,
     });
     if (normalizedPdf.length > STROKE_MAX_BYTES) return { ok: false, message: "涂鸦数据过大" };
     return { ok: true, value: normalizedPdf };
