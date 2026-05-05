@@ -1356,12 +1356,19 @@ async function addPdfFile(file: File) {
     const asset = await uploadPdfAsset(file)
 
     const PAGE_GAP = 24
-    // Cap on-canvas width so a giant PDF doesn't dominate the viewport.
-    // Renderer will still upscale the rendered canvases to match.
+    // Cap the inserted PDF so it fits within the current viewport on
+    // BOTH axes. A portrait page would otherwise overflow vertically
+    // even with a moderate width cap.
     const canvas = canvasRef.value
     const rect = canvas?.getBoundingClientRect()
     const viewportWidth = (rect?.width || 800) / scale.value
-    const fitScale = Math.min(1, (viewportWidth * 0.7) / metadata.pageWidth)
+    const viewportHeight = (rect?.height || 600) / scale.value
+    const naturalFirstHeight = metadata.pageHeights[0] ?? metadata.pageWidth
+    const fitScale = Math.min(
+      1,
+      (viewportWidth * 0.7) / metadata.pageWidth,
+      (viewportHeight * 0.85) / naturalFirstHeight,
+    )
     const width = Math.max(120, metadata.pageWidth * fitScale)
     const heightScale = width / metadata.pageWidth
     const pageHeights = metadata.pageHeights.map(h => h * heightScale)
@@ -1371,9 +1378,9 @@ async function addPdfFile(file: File) {
 
     const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
     const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
-    // Anchor near top of viewport so the page top reads naturally.
+    // Center the page in the viewport (now that it fits both axes).
     const x = centerX - width / 2
-    const y = centerY - Math.min(initialHeight, ((rect?.height || 600) * 0.45) / scale.value)
+    const y = centerY - initialHeight / 2
 
     const pdfElement = createLocalStroke({
       type: 'pdf',
@@ -1587,16 +1594,26 @@ async function saveStroke(stroke: CanvasStroke) {
 }
 
 // Flip a PDF element to a new page. Single-page mode: each page may
-// have its own aspect ratio so we resize the element height to match.
+// have its own aspect ratio, but we preserve the user's existing
+// stretch by carrying the current vertical scale (element.height /
+// pageHeights[currentIdx]) across the flip. So a user who already
+// resized the PDF won't see it snap back to the page's natural size
+// — only the per-page aspect difference shows up.
 // Persisted via the same PATCH path as a regular transform so other
 // clients see the flip.
 function setPdfPage(element: CanvasStroke, nextIndex: number) {
   if (element.type !== 'pdf') return
   const target = Math.max(0, Math.min(element.pageCount - 1, Math.floor(nextIndex)))
-  if (target === (element.currentPageIndex ?? 0)) return
+  const currentIdx = element.currentPageIndex ?? 0
+  if (target === currentIdx) return
+  const currentNominal = element.pageHeights[currentIdx]
+  const targetNominal = element.pageHeights[target]
   element.currentPageIndex = target
-  const newHeight = element.pageHeights[target]
-  if (Number.isFinite(newHeight) && newHeight > 0) element.height = newHeight
+  if (Number.isFinite(currentNominal) && currentNominal > 0
+    && Number.isFinite(targetNominal) && targetNominal > 0) {
+    const verticalScale = element.height / currentNominal
+    element.height = targetNominal * verticalScale
+  }
   renderFrame()
   void saveElementTransform(element)
 }
