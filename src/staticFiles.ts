@@ -22,7 +22,10 @@ export async function serveStaticAsset(pathname: string, distDir: string): Promi
 
 export function serveIndex(distDir: string): Response {
   return new Response(Bun.file(join(distDir, "index.html")), {
-    headers: { "content-type": "text/html; charset=utf-8" },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+    },
   });
 }
 
