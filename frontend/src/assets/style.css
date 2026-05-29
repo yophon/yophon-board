@@ -203,6 +203,7 @@ button { border: 0; background: none; cursor: pointer; }
 
 .board-stage {
   min-height: 0;
+  min-width: 0;
   padding: 0 20px 20px;
   display: flex;
 }
@@ -210,6 +211,7 @@ button { border: 0; background: none; cursor: pointer; }
 .board-stage .whiteboard-wrap {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   border: var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -303,7 +305,11 @@ button { border: 0; background: none; cursor: pointer; }
   border-radius: 0;
 }
 
-.whiteboard-wrap canvas {
+.whiteboard-wrap > canvas:first-of-type {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
 }
 

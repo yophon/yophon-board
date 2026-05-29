@@ -371,6 +371,7 @@ let unmounted = false
 let pinchDistance = 0
 let pinchCenter: Point | null = null
 let pinchActive = false
+let resizeObserver: ResizeObserver | null = null
 let lastErasePoint: Point | null = null
 const pendingEraseIds = new Set<number>()
 const pendingEraseUpdateKeys = new Set<string>()
@@ -1537,10 +1538,15 @@ function resizeCanvas() {
   const wrap = wrapRef.value
   if (!canvas || !wrap) return
   const dpr = window.devicePixelRatio || 1
-  canvas.width = Math.max(1, Math.floor(wrap.clientWidth * dpr))
-  canvas.height = Math.max(1, Math.floor(wrap.clientHeight * dpr))
-  canvas.style.width = wrap.clientWidth + 'px'
-  canvas.style.height = wrap.clientHeight + 'px'
+  const rect = wrap.getBoundingClientRect()
+  const cssWidth = Math.max(1, Math.round(rect.width))
+  const cssHeight = Math.max(1, Math.round(rect.height))
+  const pixelWidth = Math.max(1, Math.floor(cssWidth * dpr))
+  const pixelHeight = Math.max(1, Math.floor(cssHeight * dpr))
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight
+  canvas.style.width = cssWidth + 'px'
+  canvas.style.height = cssHeight + 'px'
   renderFrame()
 }
 
@@ -1898,6 +1904,10 @@ onMounted(async () => {
   ensureLegacyClientId()
   readInitialPage()
   resizeCanvas()
+  if (wrapRef.value && 'ResizeObserver' in window) {
+    resizeObserver = new ResizeObserver(() => resizeCanvas())
+    resizeObserver.observe(wrapRef.value)
+  }
   window.addEventListener('resize', resizeCanvas)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
@@ -1913,6 +1923,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true
+  resizeObserver?.disconnect()
+  resizeObserver = null
   window.removeEventListener('resize', resizeCanvas)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
