@@ -177,6 +177,94 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
     return { ok: true, value: normalizedText };
   }
 
+  if (stroke?.type === "mindmap") {
+    const x = Number(stroke.x);
+    const y = Number(stroke.y);
+    const width = Number(stroke.width);
+    const height = Number(stroke.height);
+    const fontSize = Number(stroke.fontSize);
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !Number.isFinite(fontSize) ||
+      width < 160 ||
+      height < 120 ||
+      width > 4096 ||
+      height > 4096 ||
+      fontSize < 10 ||
+      fontSize > 72 ||
+      !Array.isArray(stroke.nodes) ||
+      stroke.nodes.length < 1 ||
+      stroke.nodes.length > 40 ||
+      !Array.isArray(stroke.edges) ||
+      stroke.edges.length > 80
+    ) {
+      return { ok: false, message: "思维导图尺寸不合法" };
+    }
+
+    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string }> = [];
+    const nodeIds = new Set<string>();
+    for (const rawNode of stroke.nodes) {
+      const id = typeof rawNode?.id === "string" ? rawNode.id.trim().slice(0, 40) : "";
+      const text = typeof rawNode?.text === "string" ? rawNode.text.trim().slice(0, 120) : "";
+      const nodeX = Number(rawNode?.x);
+      const nodeY = Number(rawNode?.y);
+      const nodeWidth = Number(rawNode?.width);
+      const nodeHeight = Number(rawNode?.height);
+      if (
+        !id ||
+        nodeIds.has(id) ||
+        !text ||
+        !Number.isFinite(nodeX) ||
+        !Number.isFinite(nodeY) ||
+        !Number.isFinite(nodeWidth) ||
+        !Number.isFinite(nodeHeight) ||
+        nodeWidth < 24 ||
+        nodeHeight < 18 ||
+        nodeWidth > width ||
+        nodeHeight > height
+      ) {
+        return { ok: false, message: "思维导图节点不合法" };
+      }
+      nodeIds.add(id);
+      nodes.push({
+        id,
+        text,
+        x: Math.round(nodeX * 100) / 100,
+        y: Math.round(nodeY * 100) / 100,
+        width: Math.round(nodeWidth * 100) / 100,
+        height: Math.round(nodeHeight * 100) / 100,
+        color: typeof rawNode?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(rawNode.color) ? rawNode.color : undefined,
+      });
+    }
+
+    const edges: Array<{ from: string; to: string }> = [];
+    for (const rawEdge of stroke.edges) {
+      const from = typeof rawEdge?.from === "string" ? rawEdge.from.trim().slice(0, 40) : "";
+      const to = typeof rawEdge?.to === "string" ? rawEdge.to.trim().slice(0, 40) : "";
+      if (!nodeIds.has(from) || !nodeIds.has(to) || from === to) {
+        return { ok: false, message: "思维导图连线不合法" };
+      }
+      edges.push({ from, to });
+    }
+
+    const normalizedMindMap = JSON.stringify({
+      type: "mindmap",
+      x: Math.round(x * 100) / 100,
+      y: Math.round(y * 100) / 100,
+      width: Math.round(width * 100) / 100,
+      height: Math.round(height * 100) / 100,
+      rotation: normalizeRotation(stroke.rotation),
+      fontSize: Math.round(fontSize * 10) / 10,
+      nodes,
+      edges,
+    });
+    if (normalizedMindMap.length > STROKE_MAX_BYTES) return { ok: false, message: "涂鸦数据过大" };
+    return { ok: true, value: normalizedMindMap };
+  }
+
   const points = stroke?.points;
   if (!Array.isArray(points) || points.length < 2 || points.length > STROKE_MAX_POINTS) {
     return { ok: false, message: "涂鸦点位不合法" };

@@ -220,6 +220,9 @@
       <button class="wb-tool-btn" :class="{ active: currentTool === 'text' }" @click="insertText" title="添加文本">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14"/><path d="M12 5v14"/><path d="M8 19h8"/></svg>
       </button>
+      <button class="wb-tool-btn" @click="insertMindMap" title="添加思维导图">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M9.7 10 6.7 7.5"/><path d="m14.3 10 3-2.5"/><path d="m9.7 14-3 2.5"/><path d="m14.3 14 3 2.5"/></svg>
+      </button>
       <button
         class="wb-tool-btn"
         @pointerdown="startFullscreenPress"
@@ -308,6 +311,7 @@ import {
 import type {
   CanvasStroke,
   DrawingStrokeData,
+  MindMapElementData,
   Point,
   StrokeData,
   TextElementData,
@@ -951,10 +955,14 @@ function onCanvasDoubleClick(e: MouseEvent) {
   if (currentTool.value !== 'select') return
   const worldPoint = screenToWorld(e.clientX, e.clientY)
   const hit = hitTestElements(worldPoint)
-  if (!hit || hit.element.type !== 'text') return
+  if (!hit) return
 
   setSelectedElements([hit.element])
-  beginTextEdit(hit.element)
+  if (hit.element.type === 'text') {
+    beginTextEdit(hit.element)
+    return
+  }
+  if (hit.element.type === 'mindmap') beginMindMapEdit(hit.element)
 }
 
 function selectElementsInBox() {
@@ -1115,6 +1123,64 @@ function insertText() {
   setTool('text')
 }
 
+function insertMindMap() {
+  const canvas = canvasRef.value
+  const rect = canvas?.getBoundingClientRect()
+  const viewportWidth = (rect?.width || 800) / scale.value
+  const viewportHeight = (rect?.height || 600) / scale.value
+  const width = Math.min(760, Math.max(520, viewportWidth * 0.58))
+  const height = Math.min(420, Math.max(300, viewportHeight * 0.5))
+  const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
+  const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
+  const mindmap = createLocalStroke(createMindMapTemplate(centerX - width / 2, centerY - height / 2, width, height), currentPage.value)
+
+  allStrokes.value.push(mindmap)
+  localUndoStack.value.push(mindmap)
+  setTool('select')
+  selectedElementKeys.value = [elementKey(mindmap)]
+  void saveStroke(mindmap)
+  saveError.value = '思维导图已添加'
+  window.setTimeout(() => {
+    if (saveError.value === '思维导图已添加') saveError.value = ''
+  }, 1600)
+  renderFrame()
+}
+
+function createMindMapTemplate(x: number, y: number, width: number, height: number): MindMapElementData {
+  const rootWidth = 148
+  const rootHeight = 58
+  const branchWidth = 126
+  const branchHeight = 44
+  const rootX = width / 2 - rootWidth / 2
+  const rootY = height / 2 - rootHeight / 2
+  const leftX = Math.max(18, width * 0.13)
+  const rightX = Math.min(width - branchWidth - 18, width * 0.87 - branchWidth)
+  const topY = Math.max(18, height * 0.24 - branchHeight / 2)
+  const bottomY = Math.min(height - branchHeight - 18, height * 0.76 - branchHeight / 2)
+  return {
+    type: 'mindmap',
+    x,
+    y,
+    width,
+    height,
+    rotation: 0,
+    fontSize: 18,
+    nodes: [
+      { id: 'root', text: '中心主题', x: rootX, y: rootY, width: rootWidth, height: rootHeight, color: '#202124' },
+      { id: 'left-top', text: '分支', x: leftX, y: topY, width: branchWidth, height: branchHeight, color: '#f8fbff' },
+      { id: 'left-bottom', text: '分支', x: leftX, y: bottomY, width: branchWidth, height: branchHeight, color: '#f8fbff' },
+      { id: 'right-top', text: '分支', x: rightX, y: topY, width: branchWidth, height: branchHeight, color: '#f7fff9' },
+      { id: 'right-bottom', text: '分支', x: rightX, y: bottomY, width: branchWidth, height: branchHeight, color: '#f7fff9' },
+    ],
+    edges: [
+      { from: 'root', to: 'left-top' },
+      { from: 'root', to: 'left-bottom' },
+      { from: 'root', to: 'right-top' },
+      { from: 'root', to: 'right-bottom' },
+    ],
+  }
+}
+
 function beginTextInsertion(point: Point) {
   const box = measureInsertedText()
   beginTextInsertionState({
@@ -1150,12 +1216,46 @@ function beginTextEdit(element: TextStroke) {
   })
 }
 
+function beginMindMapEdit(element: CanvasStroke) {
+  if (element.type !== 'mindmap') return
+  const root = element.nodes.find(node => node.id === 'root') || element.nodes[0]
+  if (!root) return
+  beginTextEditState({
+    key: `${elementKey(element)}::${root.id}`,
+    text: root.text,
+    x: element.x + root.x,
+    y: element.y + root.y,
+    width: root.width,
+    height: root.height,
+    rotation: element.rotation ?? 0,
+    fontSize: element.fontSize,
+    color: root.id === 'root' ? '#ffffff' : '#202124',
+    align: 'center',
+    bold: root.id === 'root',
+    italic: false,
+  })
+}
+
 /**
  * Persistence side of text editor commits. The composable handles open
  * / type / commit-or-cancel; we just receive a finalized commit and
  * either patch an existing text stroke or create a new one.
  */
 async function applyTextEditorCommit(commit: TextEditorCommit) {
+  if (commit.mode === 'edit' && commit.key?.includes('::')) {
+    const [elementKeyPart, nodeId] = commit.key.split('::')
+    const element = allStrokes.value.find(stroke => elementKey(stroke) === elementKeyPart)
+    if (element?.type === 'mindmap') {
+      const node = element.nodes.find(item => item.id === nodeId)
+      if (node) {
+        node.text = commit.text
+        setSelectedElements([element])
+        await saveElementTransform(element)
+      }
+    }
+    return
+  }
+
   if (commit.mode === 'edit' && commit.key) {
     const element = allStrokes.value.find(stroke => elementKey(stroke) === commit.key)
     if (element?.type === 'text') {

@@ -87,6 +87,23 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
           }
         }
 
+        if (stroke.type === 'mindmap') {
+          return {
+            type: 'mindmap' as const,
+            x: stroke.x,
+            y: stroke.y,
+            width: stroke.width,
+            height: stroke.height,
+            rotation: stroke.rotation,
+            fontSize: stroke.fontSize,
+            nodes: stroke.nodes.map(node => ({ ...node })),
+            edges: stroke.edges.map(edge => ({ ...edge })),
+            page: stroke.page,
+            localId: stroke.localId,
+            retryCount: stroke.retryCount,
+          }
+        }
+
         return {
           points: stroke.points,
           color: stroke.color,

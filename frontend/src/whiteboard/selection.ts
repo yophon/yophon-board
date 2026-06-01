@@ -11,7 +11,8 @@ import type { CanvasStroke, Point, StrokeData } from './types'
 export type ImageStroke = Extract<CanvasStroke, { type: 'image' }>
 export type TextStroke = Extract<CanvasStroke, { type: 'text' }>
 export type PdfStroke = Extract<CanvasStroke, { type: 'pdf' }>
-export type RectElementStroke = ImageStroke | TextStroke | PdfStroke
+export type MindMapStroke = Extract<CanvasStroke, { type: 'mindmap' }>
+export type RectElementStroke = ImageStroke | TextStroke | PdfStroke | MindMapStroke
 export type DrawingStroke = Extract<CanvasStroke, { points: Point[] }>
 export type TransformMode = 'move' | 'resize-n' | 'resize-ne' | 'resize-e' | 'resize-se' | 'resize-s' | 'resize-sw' | 'resize-w' | 'resize-nw' | 'rotate'
 
@@ -46,7 +47,7 @@ export function isDrawingStroke(element: CanvasStroke | StrokeData): element is 
 }
 
 export function isRectElement(element: CanvasStroke | StrokeData): element is RectElementStroke {
-  return element.type === 'image' || element.type === 'text' || element.type === 'pdf'
+  return element.type === 'image' || element.type === 'text' || element.type === 'pdf' || element.type === 'mindmap'
 }
 
 export function cloneElement(element: CanvasStroke): CanvasStroke {
@@ -412,6 +413,16 @@ export function applyElementResize(
     element.rotation = start.rotation ?? 0
     if (element.type === 'text' && start.type === 'text') {
       element.fontSize = Math.max(8, Math.min(160, start.fontSize * ((Math.abs(sx) + Math.abs(sy)) / 2)))
+    }
+    if (element.type === 'mindmap' && start.type === 'mindmap') {
+      element.fontSize = Math.max(10, Math.min(72, start.fontSize * ((Math.abs(sx) + Math.abs(sy)) / 2)))
+      element.nodes = start.nodes.map(node => ({
+        ...node,
+        x: node.x * Math.abs(sx),
+        y: node.y * Math.abs(sy),
+        width: Math.max(36, node.width * Math.abs(sx)),
+        height: Math.max(24, node.height * Math.abs(sy)),
+      }))
     }
     return
   }

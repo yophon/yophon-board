@@ -31,6 +31,11 @@ export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: (StrokeData 
       continue
     }
 
+    if (stroke.type === 'mindmap') {
+      drawMindMapElement(ctx, stroke)
+      continue
+    }
+
     if (stroke.points.length < 2) continue
     ctx.beginPath()
     ctx.lineCap = 'round'
@@ -221,4 +226,84 @@ function drawTextElement(ctx: CanvasRenderingContext2D, text: Extract<StrokeData
   }
 
   ctx.restore()
+}
+
+function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<StrokeData, { type: 'mindmap' }> & { failed?: boolean }) {
+  ctx.save()
+  ctx.globalAlpha = mindmap.failed ? 0.55 : 1
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.translate(mindmap.x + mindmap.width / 2, mindmap.y + mindmap.height / 2)
+  ctx.rotate(degreesToRadians(mindmap.rotation ?? 0))
+  ctx.translate(-mindmap.width / 2, -mindmap.height / 2)
+
+  const nodes = new Map(mindmap.nodes.map(node => [node.id, node]))
+  ctx.lineWidth = 2.4
+  ctx.strokeStyle = 'rgba(32,33,36,.35)'
+  ctx.lineCap = 'round'
+  for (const edge of mindmap.edges) {
+    const from = nodes.get(edge.from)
+    const to = nodes.get(edge.to)
+    if (!from || !to) continue
+    const fromX = from.x + from.width / 2
+    const fromY = from.y + from.height / 2
+    const toX = to.x + to.width / 2
+    const toY = to.y + to.height / 2
+    const bend = Math.max(36, Math.abs(toX - fromX) * 0.42)
+    ctx.beginPath()
+    ctx.moveTo(fromX, fromY)
+    ctx.bezierCurveTo(
+      fromX + (toX >= fromX ? bend : -bend),
+      fromY,
+      toX - (toX >= fromX ? bend : -bend),
+      toY,
+      toX,
+      toY,
+    )
+    ctx.stroke()
+  }
+
+  for (const node of mindmap.nodes) {
+    const isRoot = node.id === 'root'
+    const radius = isRoot ? 16 : 12
+    ctx.fillStyle = node.color || (isRoot ? '#202124' : '#ffffff')
+    roundRect(ctx, node.x, node.y, node.width, node.height, radius)
+    ctx.fill()
+    ctx.strokeStyle = isRoot ? '#202124' : 'rgba(32,33,36,.18)'
+    ctx.lineWidth = isRoot ? 0 : 1.4
+    if (!isRoot) ctx.stroke()
+
+    ctx.fillStyle = isRoot ? '#ffffff' : '#202124'
+    ctx.font = `${isRoot ? 700 : 600} ${mindmap.fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const lines = wrapTextLines(ctx, node.text, Math.max(1, node.width - 22)).slice(0, 2)
+    const lineHeight = mindmap.fontSize * 1.2
+    const startY = node.y + node.height / 2 - ((lines.length - 1) * lineHeight) / 2
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], node.x + node.width / 2, startY + i * lineHeight)
+    }
+  }
+
+  if (mindmap.failed) {
+    ctx.strokeStyle = 'rgba(234,67,53,.8)'
+    ctx.lineWidth = 2
+    ctx.strokeRect(0, 0, mindmap.width, mindmap.height)
+  }
+
+  ctx.restore()
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const r = Math.min(radius, width / 2, height / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.lineTo(x + width - r, y)
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r)
+  ctx.lineTo(x + width, y + height - r)
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height)
+  ctx.lineTo(x + r, y + height)
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r)
+  ctx.lineTo(x, y + r)
+  ctx.quadraticCurveTo(x, y, x + r, y)
+  ctx.closePath()
 }

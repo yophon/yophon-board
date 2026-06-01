@@ -73,7 +73,34 @@ export interface TextElementData {
   italic?: boolean
 }
 
-export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData | PdfElementData
+export interface MindMapNodeData {
+  id: string
+  text: string
+  x: number
+  y: number
+  width: number
+  height: number
+  color?: string
+}
+
+export interface MindMapEdgeData {
+  from: string
+  to: string
+}
+
+export interface MindMapElementData {
+  type: 'mindmap'
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation?: number
+  fontSize: number
+  nodes: MindMapNodeData[]
+  edges: MindMapEdgeData[]
+}
+
+export type StrokeData = DrawingStrokeData | ImageElementData | TextElementData | PdfElementData | MindMapElementData
 
 export type CanvasStroke = StrokeData & {
   id?: number

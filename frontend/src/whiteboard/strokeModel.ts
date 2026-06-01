@@ -1,4 +1,4 @@
-import type { CanvasStroke, Point, StrokeData, StrokeRow, TextElementData } from './types'
+import type { CanvasStroke, MindMapElementData, Point, StrokeData, StrokeRow, TextElementData } from './types'
 
 export function createLocalStroke(stroke: StrokeData, page: number): CanvasStroke {
   if (stroke.type === 'image') {
@@ -63,6 +63,22 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
     }
   }
 
+  if (stroke.type === 'mindmap') {
+    return {
+      type: 'mindmap',
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      fontSize: stroke.fontSize,
+      nodes: stroke.nodes.map(node => ({ ...node })),
+      edges: stroke.edges.map(edge => ({ ...edge })),
+      page,
+      localId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    }
+  }
+
   return {
     points: simplifyPoints(stroke.points, stroke.width),
     color: stroke.color,
@@ -119,6 +135,20 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       align: stroke.align ?? 'left',
       bold: stroke.bold ?? false,
       italic: stroke.italic ?? false,
+    }
+  }
+
+  if (stroke.type === 'mindmap') {
+    return {
+      type: 'mindmap',
+      x: stroke.x,
+      y: stroke.y,
+      width: stroke.width,
+      height: stroke.height,
+      rotation: stroke.rotation ?? 0,
+      fontSize: stroke.fontSize,
+      nodes: stroke.nodes.map(node => ({ ...node })),
+      edges: stroke.edges.map(edge => ({ ...edge })),
     }
   }
 
@@ -216,6 +246,52 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
       }
       if (!text.text || !Number.isFinite(text.x) || !Number.isFinite(text.y) || !Number.isFinite(text.width) || !Number.isFinite(text.height)) return null
       return text
+    }
+
+    if (stroke.type === 'mindmap') {
+      const nodes = Array.isArray(stroke.nodes)
+        ? stroke.nodes.map((node: MindMapElementData['nodes'][number]) => ({
+            id: typeof node.id === 'string' ? node.id.slice(0, 40) : '',
+            text: typeof node.text === 'string' ? node.text : '',
+            x: Number(node.x),
+            y: Number(node.y),
+            width: Number(node.width),
+            height: Number(node.height),
+            color: typeof node.color === 'string' ? node.color : undefined,
+          }))
+        : []
+      const nodeIds = new Set(nodes.map(node => node.id))
+      const edges = Array.isArray(stroke.edges)
+        ? stroke.edges
+            .map((edge: MindMapElementData['edges'][number]) => ({
+              from: typeof edge.from === 'string' ? edge.from.slice(0, 40) : '',
+              to: typeof edge.to === 'string' ? edge.to.slice(0, 40) : '',
+            }))
+            .filter(edge => nodeIds.has(edge.from) && nodeIds.has(edge.to))
+        : []
+      const mindmap = {
+        id: row.id,
+        created_at: row.created_at,
+        type: 'mindmap' as const,
+        x: Number(stroke.x),
+        y: Number(stroke.y),
+        width: Number(stroke.width),
+        height: Number(stroke.height),
+        rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
+        fontSize: Number.isFinite(Number(stroke.fontSize)) ? Number(stroke.fontSize) : 18,
+        nodes,
+        edges,
+        page: row.page ?? 0,
+      }
+      if (
+        !Number.isFinite(mindmap.x) ||
+        !Number.isFinite(mindmap.y) ||
+        !Number.isFinite(mindmap.width) ||
+        !Number.isFinite(mindmap.height) ||
+        mindmap.nodes.length < 1 ||
+        mindmap.nodes.some(node => !node.id || !node.text || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height))
+      ) return null
+      return mindmap
     }
 
     if (!Array.isArray(stroke.points) || stroke.points.length < 2) return null
