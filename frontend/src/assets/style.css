@@ -504,6 +504,21 @@ button { border: 0; background: none; cursor: pointer; }
   white-space: pre-wrap;
 }
 
+.wb-text-editor-mindmap {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  line-height: 1.2;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+.wb-text-editor-mindmap::-webkit-scrollbar {
+  display: none;
+}
+
 .wb-text-toolbar {
   position: absolute;
   z-index: 12;

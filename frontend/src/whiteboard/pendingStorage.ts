@@ -96,6 +96,8 @@ export function savePendingStrokes(boardSlug: string, strokes: CanvasStroke[]) {
             height: stroke.height,
             rotation: stroke.rotation,
             fontSize: stroke.fontSize,
+            layout: stroke.layout,
+            theme: stroke.theme,
             nodes: stroke.nodes.map(node => ({ ...node })),
             edges: stroke.edges.map(edge => ({ ...edge })),
             page: stroke.page,

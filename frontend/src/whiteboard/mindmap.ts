@@ -244,8 +244,10 @@ export function layoutMindMap(element: MindMapElementData) {
   const rootX = CANVAS_PADDING + leftWidth + (leftWidth > 0 ? ROOT_GAP : 0)
   const rootY = CANVAS_PADDING + Math.max(leftHeight, rightHeight, root.height) / 2 - root.height / 2
 
-  root.x = rootX
-  root.y = rootY
+  if (!root.manualPosition) {
+    root.x = rootX
+    root.y = rootY
+  }
 
   placeLayoutStack(element, leftLayouts, 'left', root.x - ROOT_GAP, root.y + root.height / 2 - leftHeight / 2)
   placeLayoutStack(element, rightLayouts, 'right', root.x + root.width + ROOT_GAP, root.y + root.height / 2 - rightHeight / 2)
@@ -279,8 +281,10 @@ function placeLayoutStack(element: MindMapElementData, layouts: SubtreeLayout[],
 
 function placeSubtreeLayout(element: MindMapElementData, layout: SubtreeLayout, branch: BranchSide, anchorX: number, top: number) {
   const node = layout.node
-  node.x = branch === 'left' ? anchorX - node.width : anchorX
-  node.y = top + layout.height / 2 - node.height / 2
+  if (!node.manualPosition) {
+    node.x = branch === 'left' ? anchorX - node.width : anchorX
+    node.y = top + layout.height / 2 - node.height / 2
+  }
 
   if (layout.children.length === 0) return
   const childAnchorX = branch === 'left' ? node.x - H_GAP : node.x + node.width + H_GAP

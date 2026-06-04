@@ -20,6 +20,7 @@
       v-if="textEditor"
       ref="textEditorRef"
       class="wb-text-editor"
+      :class="{ 'wb-text-editor-mindmap': isMindMapTextEditor }"
       :style="textEditorStyle"
       :value="textEditor.text"
       @input="onTextEditorInput"
@@ -443,14 +444,22 @@ const eraserMenuOpen = ref(false)
 
 type WhiteboardTool = 'pen' | 'eraser' | 'drag' | 'select' | 'text'
 type EraserMode = 'mask' | 'delete' | 'cut'
+interface MindMapNodeDragState {
+  element: MindMapElementData & CanvasStroke
+  nodeId: string
+  startPointer: Point
+  startNode: MindMapNodeData
+}
 
 const selectedElementKeys = ref<string[]>([])
 const selectedMindMapNodeId = ref<string | null>(null)
 const isElementTransforming = ref(false)
+const isMindMapNodeDragging = ref(false)
 const isBoxSelecting = ref(false)
 const selectionBoxStart = ref<Point | null>(null)
 const selectionBoxEnd = ref<Point | null>(null)
 let elementTransform: ElementTransformState | null = null
+let mindMapNodeDrag: MindMapNodeDragState | null = null
 
 const {
   editor: textEditor,
@@ -510,6 +519,7 @@ const {
 const failedCount = computed(() => allStrokes.value.filter(s => s.failed && !s.id).length)
 const canUndo = computed(() => localUndoStack.value.length > 0)
 const canvasCursor = computed(() => {
+  if (isMindMapNodeDragging.value) return 'grabbing'
   if (isElementTransforming.value) return 'grabbing'
   if (isPanning.value) return 'grabbing'
   if (currentTool.value === 'drag' || spaceHeld.value) return 'grab'
@@ -520,11 +530,13 @@ const canvasCursor = computed(() => {
 const textEditorStyle = computed(() => {
   const editor = textEditor.value
   if (!editor) return {}
+  const isMindMapEditor = editor.key?.includes('::') ?? false
+  const padding = isMindMapEditor ? Math.max(8, Math.min(14, editor.fontSize * 0.68)) : 4
   return {
-    left: `${offsetX.value + editor.x * scale.value}px`,
-    top: `${offsetY.value + editor.y * scale.value}px`,
-    width: `${editor.width * scale.value}px`,
-    height: `${editor.height * scale.value}px`,
+    left: `${offsetX.value + (editor.x + (isMindMapEditor ? padding : 0)) * scale.value}px`,
+    top: `${offsetY.value + (editor.y + (isMindMapEditor ? padding : 0)) * scale.value}px`,
+    width: `${Math.max(1, (editor.width - (isMindMapEditor ? padding * 2 : 0)) * scale.value)}px`,
+    height: `${Math.max(1, (editor.height - (isMindMapEditor ? padding * 2 : 0)) * scale.value)}px`,
     fontSize: `${editor.fontSize * scale.value}px`,
     color: editor.color,
     fontFamily: TEXT_FONT_FAMILY,
@@ -612,6 +624,7 @@ const statusMessage = computed(() => {
   if (wsState.value !== 'online') return '实时同步重连中'
   return ''
 })
+const isMindMapTextEditor = computed(() => textEditor.value?.key?.includes('::') ?? false)
 
 function selectPreset(i: number) {
   activePresetIndex.value = i
@@ -648,10 +661,12 @@ function clearSelection() {
   selectedElementKeys.value = []
   selectedMindMapNodeId.value = null
   isElementTransforming.value = false
+  isMindMapNodeDragging.value = false
   isBoxSelecting.value = false
   selectionBoxStart.value = null
   selectionBoxEnd.value = null
   elementTransform = null
+  mindMapNodeDrag = null
 }
 
 function updatePreset(key: 'color' | 'width', value: string | number) {
@@ -748,7 +763,13 @@ function renderFrame() {
   }
   ctx.restore()
 
-  const allToDraw = [...allStrokes.value]
+  const editingMindMapNode = getEditingMindMapNode()
+  const allToDraw = allStrokes.value.map(stroke => {
+    if (editingMindMapNode && stroke.type === 'mindmap' && elementKey(stroke) === editingMindMapNode.elementKey) {
+      return { ...stroke, editingNodeId: editingMindMapNode.nodeId }
+    }
+    return stroke
+  })
   if (currentStroke.value) allToDraw.push(currentStroke.value)
 
   ctx.save()
@@ -765,6 +786,14 @@ function renderFrame() {
 function prepareStrokeForBoard(stroke: CanvasStroke): CanvasStroke {
   if (stroke.type === 'mindmap') normalizeMindMap(stroke)
   return stroke
+}
+
+function getEditingMindMapNode() {
+  const key = textEditor.value?.key
+  if (!key?.includes('::')) return null
+  const [elementKeyPart, nodeId] = key.split('::')
+  if (!elementKeyPart || !nodeId) return null
+  return { elementKey: elementKeyPart, nodeId }
 }
 
 function scheduleRender() {
@@ -819,7 +848,7 @@ function drawSelectedElementOverlay(ctx: CanvasRenderingContext2D) {
 function drawSelectedMindMapNodeOverlay(ctx: CanvasRenderingContext2D) {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
-  if (!element || !node) return
+  if (!element || !node || isMindMapTextEditor.value) return
 
   ctx.save()
   ctx.globalAlpha = 1
@@ -895,7 +924,7 @@ function hitTestElements(point: Point) {
   return hitTestSelectionElements(point, allStrokes.value, getSelectedElements(), scale.value)
 }
 
-function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: CanvasStroke; node: MindMapNodeData } | null {
+function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: MindMapElementData & CanvasStroke; node: MindMapNodeData } | null {
   const candidates = element
     ? [element]
     : [...allStrokes.value].reverse()
@@ -917,6 +946,25 @@ function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: Ca
     }
   }
   return null
+}
+
+function updateMindMapNodeDrag(worldPoint: Point) {
+  if (!mindMapNodeDrag || mindMapNodeDrag.element.type !== 'mindmap') return
+  const element = mindMapNodeDrag.element
+  const node = element.nodes.find(item => item.id === mindMapNodeDrag?.nodeId)
+  if (!node) return
+  const local = worldToMindMapLocal(worldPoint, element)
+  const dx = local.x - mindMapNodeDrag.startPointer.x
+  const dy = local.y - mindMapNodeDrag.startPointer.y
+  node.x = Math.max(8, mindMapNodeDrag.startNode.x + dx)
+  node.y = Math.max(8, mindMapNodeDrag.startNode.y + dy)
+  node.manualPosition = true
+  if (node.id !== 'root') {
+    const root = element.nodes.find(item => item.id === 'root')
+    if (root) node.branch = node.x + node.width / 2 < root.x + root.width / 2 ? 'left' : 'right'
+  }
+  layoutMindMap(element)
+  selectedMindMapNodeId.value = node.id
 }
 
 function onPointerDown(e: PointerEvent) {
@@ -953,8 +1001,18 @@ function onPointerDown(e: PointerEvent) {
 
   const nodeHit = currentTool.value === 'select' ? hitTestMindMapNode(worldPoint) : null
   if (nodeHit) {
+    e.preventDefault()
     selectedMindMapNodeId.value = nodeHit.node.id
     if (!isElementSelected(nodeHit.element)) setSelectedElements([nodeHit.element])
+    isMindMapNodeDragging.value = true
+    mindMapNodeDrag = {
+      element: nodeHit.element,
+      nodeId: nodeHit.node.id,
+      startPointer: worldToMindMapLocal(worldPoint, nodeHit.element),
+      startNode: { ...nodeHit.node },
+    }
+    renderFrame()
+    return
   }
 
   const hit = currentTool.value === 'select' ? hitTestElements(worldPoint) : null
@@ -1031,6 +1089,12 @@ function onPointerMove(e: PointerEvent) {
     return
   }
 
+  if (isMindMapNodeDragging.value && mindMapNodeDrag) {
+    updateMindMapNodeDrag(screenToWorld(e.clientX, e.clientY))
+    renderFrame()
+    return
+  }
+
   if (isBoxSelecting.value) {
     selectionBoxEnd.value = screenToWorld(e.clientX, e.clientY)
     renderFrame()
@@ -1077,6 +1141,14 @@ function onPointerUp(e: PointerEvent) {
     const elements = getSelectedElements()
     elementTransform = null
     for (const element of elements) void saveElementTransform(element)
+    return
+  }
+
+  if (isMindMapNodeDragging.value) {
+    const element = mindMapNodeDrag?.element
+    isMindMapNodeDragging.value = false
+    mindMapNodeDrag = null
+    if (element) void saveElementTransform(element)
     return
   }
 
@@ -1367,6 +1439,7 @@ function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.
     bold: node.id === 'root',
     italic: false,
   })
+  renderFrame()
 }
 
 function editSelectedMindMapNode() {
@@ -1468,6 +1541,8 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
       const node = element.nodes.find(item => item.id === nodeId)
       if (node) {
         node.text = commit.text
+        node.width = Math.max(node.width, Math.min(260, commit.width))
+        node.height = Math.max(node.height, Math.min(90, commit.height))
         setSelectedElements([element])
         selectedMindMapNodeId.value = node.id
         await saveElementTransform(element)

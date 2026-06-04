@@ -264,6 +264,7 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
             color: typeof node.color === 'string' ? node.color : undefined,
             branch: node.branch === 'left' ? 'left' as const : node.branch === 'right' ? 'right' as const : undefined,
             collapsed: node.collapsed === true,
+            manualPosition: node.manualPosition === true,
           }))
         : []
       const nodeIds = new Set(nodes.map(node => node.id))

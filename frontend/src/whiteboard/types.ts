@@ -83,6 +83,7 @@ export interface MindMapNodeData {
   color?: string
   branch?: 'left' | 'right'
   collapsed?: boolean
+  manualPosition?: boolean
 }
 
 export interface MindMapEdgeData {

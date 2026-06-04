@@ -15,7 +15,7 @@ interface DrawOptions {
   scheduleRender: () => void
 }
 
-export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: (StrokeData & { failed?: boolean })[], options: DrawOptions) {
+export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: (StrokeData & { failed?: boolean; editingNodeId?: string })[], options: DrawOptions) {
   for (const stroke of strokes) {
     if (stroke.type === 'image') {
       drawImageElement(ctx, stroke, options)
@@ -229,7 +229,7 @@ function drawTextElement(ctx: CanvasRenderingContext2D, text: Extract<StrokeData
   ctx.restore()
 }
 
-function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<StrokeData, { type: 'mindmap' }> & { failed?: boolean }) {
+function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<StrokeData, { type: 'mindmap' }> & { failed?: boolean; editingNodeId?: string }) {
   ctx.save()
   ctx.globalAlpha = mindmap.failed ? 0.55 : 1
   ctx.globalCompositeOperation = 'source-over'
@@ -282,15 +282,17 @@ function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<Stro
     ctx.lineWidth = isRoot ? 0 : 1.2
     if (!isRoot) ctx.stroke()
 
-    ctx.fillStyle = isRoot ? '#ffffff' : '#202124'
-    ctx.font = `${isRoot ? 700 : 600} ${isRoot ? mindmap.fontSize + 1 : mindmap.fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const lines = wrapTextLines(ctx, node.text, Math.max(1, node.width - 22)).slice(0, 2)
-    const lineHeight = mindmap.fontSize * 1.2
-    const startY = node.y + node.height / 2 - ((lines.length - 1) * lineHeight) / 2
-    for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], node.x + node.width / 2, startY + i * lineHeight)
+    if (mindmap.editingNodeId !== node.id) {
+      ctx.fillStyle = isRoot ? '#ffffff' : '#202124'
+      ctx.font = `${isRoot ? 700 : 600} ${isRoot ? mindmap.fontSize + 1 : mindmap.fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      const lines = wrapTextLines(ctx, node.text, Math.max(1, node.width - 22)).slice(0, 2)
+      const lineHeight = mindmap.fontSize * 1.2
+      const startY = node.y + node.height / 2 - ((lines.length - 1) * lineHeight) / 2
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], node.x + node.width / 2, startY + i * lineHeight)
+      }
     }
 
     drawMindMapCollapseBadge(ctx, mindmap, node)

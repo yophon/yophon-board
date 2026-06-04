@@ -204,7 +204,7 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       return { ok: false, message: "思维导图尺寸不合法" };
     }
 
-    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string; branch?: "left" | "right"; collapsed?: boolean }> = [];
+    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string; branch?: "left" | "right"; collapsed?: boolean; manualPosition?: boolean }> = [];
     const nodeIds = new Set<string>();
     for (const rawNode of stroke.nodes) {
       const id = typeof rawNode?.id === "string" ? rawNode.id.trim().slice(0, 40) : "";
@@ -239,6 +239,7 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
         color: typeof rawNode?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(rawNode.color) ? rawNode.color : undefined,
         branch: rawNode?.branch === "left" ? "left" : rawNode?.branch === "right" ? "right" : undefined,
         collapsed: rawNode?.collapsed === true,
+        manualPosition: rawNode?.manualPosition === true,
       });
     }
 
