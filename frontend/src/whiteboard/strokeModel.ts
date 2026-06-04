@@ -72,6 +72,8 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
+      layout: stroke.layout,
+      theme: stroke.theme,
       nodes: stroke.nodes.map(node => ({ ...node })),
       edges: stroke.edges.map(edge => ({ ...edge })),
       page,
@@ -147,6 +149,8 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
+      layout: stroke.layout,
+      theme: stroke.theme,
       nodes: stroke.nodes.map(node => ({ ...node })),
       edges: stroke.edges.map(edge => ({ ...edge })),
     }
@@ -258,6 +262,8 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
             width: Number(node.width),
             height: Number(node.height),
             color: typeof node.color === 'string' ? node.color : undefined,
+            branch: node.branch === 'left' ? 'left' as const : node.branch === 'right' ? 'right' as const : undefined,
+            collapsed: node.collapsed === true,
           }))
         : []
       const nodeIds = new Set(nodes.map(node => node.id))
@@ -266,6 +272,7 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
             .map((edge: MindMapElementData['edges'][number]) => ({
               from: typeof edge.from === 'string' ? edge.from.slice(0, 40) : '',
               to: typeof edge.to === 'string' ? edge.to.slice(0, 40) : '',
+              stroke: typeof edge.stroke === 'string' ? edge.stroke : undefined,
             }))
             .filter(edge => nodeIds.has(edge.from) && nodeIds.has(edge.to))
         : []
@@ -279,6 +286,8 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
         height: Number(stroke.height),
         rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
         fontSize: Number.isFinite(Number(stroke.fontSize)) ? Number(stroke.fontSize) : 18,
+        layout: stroke.layout === 'mind' ? 'mind' as const : undefined,
+        theme: stroke.theme === 'drawnix' ? 'drawnix' as const : undefined,
         nodes,
         edges,
         page: row.page ?? 0,

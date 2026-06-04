@@ -120,6 +120,10 @@
       <button class="wb-mindmap-action" @click="addMindMapSibling" title="添加同级节点">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="3"/><circle cx="7" cy="17" r="3"/><path d="M10 7h5"/><path d="M10 17h5"/><path d="M18 10v8"/><path d="M14 14h8"/></svg>
       </button>
+      <button class="wb-mindmap-action" :disabled="!selectedMindMapNodeHasChildren" @click="toggleSelectedMindMapCollapse" title="展开/收起">
+        <svg v-if="selectedMindMapNode?.collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
+      </button>
       <button class="wb-mindmap-action wb-mindmap-danger" :disabled="selectedMindMapNodeId === 'root'" @click="deleteMindMapNode" title="删除节点">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
       </button>
@@ -294,6 +298,22 @@ import {
 } from '../whiteboard/geometry'
 import { ensureLegacyClientId, loadPendingStrokes, savePendingStrokes } from '../whiteboard/pendingStorage'
 import { drawStrokes } from '../whiteboard/renderer'
+import {
+  MINDMAP_MAX_NODES,
+  addMindMapChildNode,
+  addMindMapSiblingNode,
+  createDrawnixMindMapTemplate,
+  createMindMapNodeId as createMindMapNodeIdFromTree,
+  deleteMindMapNodeById,
+  findMindMapParentId as findMindMapParentIdFromTree,
+  getMindMapChildren as getMindMapChildrenFromTree,
+  getMindMapDescendantIds as getMindMapDescendantIdsFromTree,
+  getNearestMindMapNodeId,
+  getVisibleMindMapNodeIds,
+  layoutMindMap as layoutMindMapTree,
+  normalizeMindMap,
+  toggleMindMapNodeCollapsed,
+} from '../whiteboard/mindmap'
 import type { PdfCache } from '../whiteboard/pdfRenderer'
 import { probePdf } from '../whiteboard/pdfRenderer'
 import {
@@ -563,6 +583,12 @@ const selectedMindMapNode = computed(() => {
   return element.nodes.find(node => node.id === selectedMindMapNodeId.value) || null
 })
 
+const selectedMindMapNodeHasChildren = computed(() => {
+  const element = selectedMindMapElement.value
+  const node = selectedMindMapNode.value
+  return !!element && !!node && getMindMapChildren(element, node.id).length > 0
+})
+
 const mindMapToolbarStyle = computed(() => {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
@@ -736,6 +762,11 @@ function renderFrame() {
   renderMiniMap()
 }
 
+function prepareStrokeForBoard(stroke: CanvasStroke): CanvasStroke {
+  if (stroke.type === 'mindmap') normalizeMindMap(stroke)
+  return stroke
+}
+
 function scheduleRender() {
   if (frameRequest !== null) return
   frameRequest = window.requestAnimationFrame(() => {
@@ -851,6 +882,8 @@ function setSelectedElements(elements: CanvasStroke[]) {
   if (elements.length !== 1 || elements[0].type !== 'mindmap') selectedMindMapNodeId.value = null
   else if (selectedMindMapNodeId.value && !elements[0].nodes.some(node => node.id === selectedMindMapNodeId.value)) {
     selectedMindMapNodeId.value = null
+  } else if (!selectedMindMapNodeId.value) {
+    selectedMindMapNodeId.value = 'root'
   }
 }
 
@@ -868,9 +901,11 @@ function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: Ca
     : [...allStrokes.value].reverse()
   for (const stroke of candidates) {
     if (stroke.type !== 'mindmap') continue
+    const visibleIds = getVisibleMindMapNodeIds(stroke)
     const local = worldToMindMapLocal(point, stroke)
     for (let i = stroke.nodes.length - 1; i >= 0; i--) {
       const node = stroke.nodes[i]
+      if (!visibleIds.has(node.id)) continue
       if (
         local.x >= node.x &&
         local.x <= node.x + node.width &&
@@ -1274,38 +1309,7 @@ function insertMindMap() {
 }
 
 function createMindMapTemplate(x: number, y: number, width: number, height: number): MindMapElementData {
-  const rootWidth = 148
-  const rootHeight = 58
-  const branchWidth = 126
-  const branchHeight = 44
-  const rootX = width / 2 - rootWidth / 2
-  const rootY = height / 2 - rootHeight / 2
-  const leftX = Math.max(18, width * 0.13)
-  const rightX = Math.min(width - branchWidth - 18, width * 0.87 - branchWidth)
-  const topY = Math.max(18, height * 0.24 - branchHeight / 2)
-  const bottomY = Math.min(height - branchHeight - 18, height * 0.76 - branchHeight / 2)
-  return {
-    type: 'mindmap',
-    x,
-    y,
-    width,
-    height,
-    rotation: 0,
-    fontSize: 18,
-    nodes: [
-      { id: 'root', text: '中心主题', x: rootX, y: rootY, width: rootWidth, height: rootHeight, color: '#202124' },
-      { id: 'left-top', text: '分支', x: leftX, y: topY, width: branchWidth, height: branchHeight, color: '#f8fbff' },
-      { id: 'left-bottom', text: '分支', x: leftX, y: bottomY, width: branchWidth, height: branchHeight, color: '#f8fbff' },
-      { id: 'right-top', text: '分支', x: rightX, y: topY, width: branchWidth, height: branchHeight, color: '#f7fff9' },
-      { id: 'right-bottom', text: '分支', x: rightX, y: bottomY, width: branchWidth, height: branchHeight, color: '#f7fff9' },
-    ],
-    edges: [
-      { from: 'root', to: 'left-top' },
-      { from: 'root', to: 'left-bottom' },
-      { from: 'root', to: 'right-top' },
-      { from: 'root', to: 'right-bottom' },
-    ],
-  }
+  return createDrawnixMindMapTemplate(x, y, width, height)
 }
 
 function beginTextInsertion(point: Point) {
@@ -1375,160 +1379,70 @@ function addMindMapChild() {
   const element = selectedMindMapElement.value
   const parent = selectedMindMapNode.value
   if (!element || !parent) return
-  if (element.nodes.length >= 40) {
-    saveError.value = '思维导图节点最多 40 个'
+  if (element.nodes.length >= MINDMAP_MAX_NODES) {
+    saveError.value = `思维导图节点最多 ${MINDMAP_MAX_NODES} 个`
     return
   }
-  const id = createMindMapNodeId(element)
-  element.nodes.push({
-    id,
-    text: '新节点',
-    x: parent.x + parent.width + 100,
-    y: parent.y,
-    width: 126,
-    height: 44,
-    color: parent.x + parent.width / 2 < element.width / 2 ? '#f8fbff' : '#f7fff9',
-  })
-  element.edges.push({ from: parent.id, to: id })
-  layoutMindMap(element)
-  selectedMindMapNodeId.value = id
+  const node = addMindMapChildNode(element, parent.id)
+  if (!node) return
+  selectedMindMapNodeId.value = node.id
   renderFrame()
   void saveElementTransform(element)
-  beginMindMapEdit(element, id)
+  beginMindMapEdit(element, node.id)
 }
 
 function addMindMapSibling() {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
   if (!element || !node || node.id === 'root') return
-  const parentId = findMindMapParentId(element, node.id) || 'root'
-  selectedMindMapNodeId.value = parentId
-  addMindMapChild()
+  if (element.nodes.length >= MINDMAP_MAX_NODES) {
+    saveError.value = `思维导图节点最多 ${MINDMAP_MAX_NODES} 个`
+    return
+  }
+  const sibling = addMindMapSiblingNode(element, node.id)
+  if (!sibling) return
+  selectedMindMapNodeId.value = sibling.id
+  renderFrame()
+  void saveElementTransform(element)
+  beginMindMapEdit(element, sibling.id)
 }
 
 function deleteMindMapNode() {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
   if (!element || !node || node.id === 'root') return
-  const removeIds = getMindMapDescendantIds(element, node.id)
-  element.nodes = element.nodes.filter(item => !removeIds.has(item.id))
-  element.edges = element.edges.filter(edge => !removeIds.has(edge.from) && !removeIds.has(edge.to))
-  selectedMindMapNodeId.value = findMindMapParentId(element, node.id) || 'root'
-  layoutMindMap(element)
+  selectedMindMapNodeId.value = deleteMindMapNodeById(element, node.id)
+  renderFrame()
+  void saveElementTransform(element)
+}
+
+function toggleSelectedMindMapCollapse() {
+  const element = selectedMindMapElement.value
+  const node = selectedMindMapNode.value
+  if (!element || !node) return
+  if (!toggleMindMapNodeCollapsed(element, node.id)) return
   renderFrame()
   void saveElementTransform(element)
 }
 
 function createMindMapNodeId(element: MindMapElementData) {
-  const used = new Set(element.nodes.map(node => node.id))
-  let i = Date.now().toString(36)
-  let id = `node-${i}`
-  while (used.has(id)) {
-    i = `${i}-${Math.random().toString(16).slice(2, 6)}`
-    id = `node-${i}`
-  }
-  return id
+  return createMindMapNodeIdFromTree(element)
 }
 
 function findMindMapParentId(element: MindMapElementData, nodeId: string) {
-  return element.edges.find(edge => edge.to === nodeId)?.from || null
+  return findMindMapParentIdFromTree(element, nodeId)
 }
 
 function getMindMapChildren(element: MindMapElementData, nodeId: string) {
-  const nodes = new Map(element.nodes.map(node => [node.id, node]))
-  return element.edges
-    .filter(edge => edge.from === nodeId)
-    .map(edge => nodes.get(edge.to))
-    .filter((node): node is MindMapNodeData => !!node)
+  return getMindMapChildrenFromTree(element, nodeId)
 }
 
 function getMindMapDescendantIds(element: MindMapElementData, nodeId: string) {
-  const removeIds = new Set<string>()
-  const visit = (id: string) => {
-    removeIds.add(id)
-    for (const child of getMindMapChildren(element, id)) visit(child.id)
-  }
-  visit(nodeId)
-  return removeIds
+  return getMindMapDescendantIdsFromTree(element, nodeId)
 }
 
 function layoutMindMap(element: MindMapElementData) {
-  const root = element.nodes.find(node => node.id === 'root')
-  if (!root) return
-  const maxDepth = getMindMapMaxDepth(element, root.id)
-  const leafCount = Math.max(2, countMindMapLeaves(element, root.id))
-  const width = Math.max(element.width, 300 + maxDepth * 190)
-  const height = Math.max(element.height, 170 + leafCount * 74)
-  element.width = width
-  element.height = height
-  root.width = Math.max(root.width, 148)
-  root.height = Math.max(root.height, 58)
-  root.x = width / 2 - root.width / 2
-  root.y = height / 2 - root.height / 2
-  root.color = '#202124'
-
-  const rootChildren = getMindMapChildren(element, root.id)
-  const left: MindMapNodeData[] = []
-  const right: MindMapNodeData[] = []
-  rootChildren.forEach((child, index) => {
-    const currentCenter = child.x + child.width / 2
-    if (currentCenter < root.x + root.width / 2 || (left.length < right.length && index > 1)) left.push(child)
-    else right.push(child)
-  })
-  if (left.length === 0 && right.length > 1) left.push(right.shift()!)
-  if (right.length === 0 && left.length > 1) right.push(left.shift()!)
-
-  layoutMindMapSide(element, root, left, -1, height / 2)
-  layoutMindMapSide(element, root, right, 1, height / 2)
-}
-
-function layoutMindMapSide(element: MindMapElementData, root: MindMapNodeData, nodes: MindMapNodeData[], direction: -1 | 1, centerY: number) {
-  if (nodes.length === 0) return
-  const rows = nodes.map(node => Math.max(1, countMindMapLeaves(element, node.id)))
-  const rowHeight = 74
-  const total = rows.reduce((sum, row) => sum + row, 0) * rowHeight
-  let cursor = centerY - total / 2
-  nodes.forEach((node, index) => {
-    const span = rows[index] * rowHeight
-    placeMindMapSubtree(element, node, direction, 1, cursor + span / 2)
-    cursor += span
-  })
-}
-
-function placeMindMapSubtree(element: MindMapElementData, node: MindMapNodeData, direction: -1 | 1, depth: number, centerY: number) {
-  node.width = Math.max(112, Math.min(168, node.width || 126))
-  node.height = Math.max(40, Math.min(58, node.height || 44))
-  const root = element.nodes.find(item => item.id === 'root')
-  const rootCenterX = root ? root.x + root.width / 2 : element.width / 2
-  const gap = 92
-  const x = rootCenterX + direction * depth * (node.width + gap)
-  node.x = direction < 0 ? x - node.width : x
-  node.y = centerY - node.height / 2
-  node.color = direction < 0 ? '#f8fbff' : '#f7fff9'
-
-  const children = getMindMapChildren(element, node.id)
-  if (children.length === 0) return
-  const rowHeight = 68
-  const rows = children.map(child => Math.max(1, countMindMapLeaves(element, child.id)))
-  const total = rows.reduce((sum, row) => sum + row, 0) * rowHeight
-  let cursor = centerY - total / 2
-  children.forEach((child, index) => {
-    const span = rows[index] * rowHeight
-    placeMindMapSubtree(element, child, direction, depth + 1, cursor + span / 2)
-    cursor += span
-  })
-}
-
-function countMindMapLeaves(element: MindMapElementData, nodeId: string): number {
-  const children = getMindMapChildren(element, nodeId)
-  if (children.length === 0) return 1
-  return children.reduce((sum, child) => sum + countMindMapLeaves(element, child.id), 0)
-}
-
-function getMindMapMaxDepth(element: MindMapElementData, nodeId: string): number {
-  const children = getMindMapChildren(element, nodeId)
-  if (children.length === 0) return 0
-  return 1 + Math.max(...children.map(child => getMindMapMaxDepth(element, child.id)))
+  layoutMindMapTree(element)
 }
 
 function worldToMindMapLocal(point: Point, element: MindMapElementData): Point {
@@ -1957,6 +1871,7 @@ function resizeCanvas() {
 }
 
 function onKeyDown(e: KeyboardEvent) {
+  if (handleMindMapKeyDown(e)) return
   if (e.code === 'Space') {
     e.preventDefault()
     spaceHeld.value = true
@@ -1967,6 +1882,65 @@ function onKeyUp(e: KeyboardEvent) {
   if (e.code === 'Space') {
     spaceHeld.value = false
   }
+}
+
+function handleMindMapKeyDown(e: KeyboardEvent) {
+  if (isEditableKeyboardTarget(e.target)) return false
+  const element = selectedMindMapElement.value
+  const node = selectedMindMapNode.value
+  if (!element || !node) return false
+
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    addMindMapChild()
+    return true
+  }
+
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    if (e.shiftKey || node.id === 'root') addMindMapChild()
+    else addMindMapSibling()
+    return true
+  }
+
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (node.id === 'root') return false
+    e.preventDefault()
+    deleteMindMapNode()
+    return true
+  }
+
+  if (e.key === ' ' && selectedMindMapNodeHasChildren.value) {
+    e.preventDefault()
+    toggleSelectedMindMapCollapse()
+    return true
+  }
+
+  const direction = e.key === 'ArrowLeft'
+    ? 'left'
+    : e.key === 'ArrowRight'
+      ? 'right'
+      : e.key === 'ArrowUp'
+        ? 'up'
+        : e.key === 'ArrowDown'
+          ? 'down'
+          : null
+  if (direction) {
+    const nextId = getNearestMindMapNodeId(element, node.id, direction)
+    if (nextId) {
+      e.preventDefault()
+      selectedMindMapNodeId.value = nextId
+      renderFrame()
+      return true
+    }
+  }
+
+  return false
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
 async function saveStroke(stroke: CanvasStroke) {
@@ -2151,7 +2125,7 @@ async function loadExistingStrokes(incremental = false) {
     const url = `/api/projects/${props.boardSlug}/strokes?page=${page}${since > 0 ? `&since=${since}` : ''}`
     const rows = await api<StrokeRow[]>(url)
     if (page !== currentPage.value) return
-    const parsed = rows.map(parseStrokeRow).filter((stroke): stroke is CanvasStroke => !!stroke)
+    const parsed = rows.map(parseStrokeRow).filter((stroke): stroke is CanvasStroke => !!stroke).map(prepareStrokeForBoard)
 
     if (incremental) {
       const knownIds = new Set(allStrokes.value.map(stroke => stroke.id).filter((v): v is number => !!v))
@@ -2242,6 +2216,7 @@ function handleSocketMessage(event: MessageEvent) {
     if ((message.page ?? message.stroke.page ?? 0) !== currentPage.value) return
     const parsed = parseStrokeRow(message.stroke)
     if (!parsed) return
+    prepareStrokeForBoard(parsed)
 
     if (parsed.id && parsed.id > lastSyncedId.value) lastSyncedId.value = parsed.id
 
@@ -2274,6 +2249,7 @@ function handleSocketMessage(event: MessageEvent) {
     if ((message.page ?? message.stroke.page ?? 0) !== currentPage.value) return
     const parsed = parseStrokeRow(message.stroke)
     if (!parsed) return
+    prepareStrokeForBoard(parsed)
     const existing = allStrokes.value.find(stroke => stroke.id === parsed.id)
     if (existing) {
       const localId = existing.localId
@@ -2320,7 +2296,7 @@ onMounted(async () => {
   window.addEventListener('paste', onPaste)
   await authStore.check()
 
-  const restored = loadPendingStrokes(props.boardSlug).filter(stroke => (stroke.page ?? 0) === currentPage.value)
+  const restored = loadPendingStrokes(props.boardSlug).filter(stroke => (stroke.page ?? 0) === currentPage.value).map(prepareStrokeForBoard)
   if (restored.length) allStrokes.value.push(...restored)
 
   await loadExistingStrokes()

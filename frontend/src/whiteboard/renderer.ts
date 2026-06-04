@@ -6,6 +6,7 @@ import {
   getTextPadding,
   wrapTextLines,
 } from './textLayout'
+import { getMindMapChildren, getVisibleMindMapNodeIds } from './mindmap'
 import type { StrokeData } from './types'
 
 interface DrawOptions {
@@ -236,19 +237,21 @@ function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<Stro
   ctx.rotate(degreesToRadians(mindmap.rotation ?? 0))
   ctx.translate(-mindmap.width / 2, -mindmap.height / 2)
 
-  const nodes = new Map(mindmap.nodes.map(node => [node.id, node]))
-  ctx.lineWidth = 2.4
-  ctx.strokeStyle = 'rgba(32,33,36,.35)'
+  const visibleIds = getVisibleMindMapNodeIds(mindmap)
+  const nodes = new Map(mindmap.nodes.filter(node => visibleIds.has(node.id)).map(node => [node.id, node]))
+  ctx.lineWidth = 2.8
   ctx.lineCap = 'round'
   for (const edge of mindmap.edges) {
     const from = nodes.get(edge.from)
     const to = nodes.get(edge.to)
     if (!from || !to) continue
-    const fromX = from.x + from.width / 2
+    const toLeft = (to.branch || 'right') === 'left'
+    const fromX = from.id === 'root' ? (toLeft ? from.x : from.x + from.width) : (toLeft ? from.x : from.x + from.width)
     const fromY = from.y + from.height / 2
-    const toX = to.x + to.width / 2
+    const toX = toLeft ? to.x + to.width : to.x
     const toY = to.y + to.height / 2
-    const bend = Math.max(36, Math.abs(toX - fromX) * 0.42)
+    const bend = Math.max(42, Math.abs(toX - fromX) * 0.46)
+    ctx.strokeStyle = edge.stroke || (toLeft ? '#5b8def' : '#37a86b')
     ctx.beginPath()
     ctx.moveTo(fromX, fromY)
     ctx.bezierCurveTo(
@@ -263,17 +266,24 @@ function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<Stro
   }
 
   for (const node of mindmap.nodes) {
+    if (!visibleIds.has(node.id)) continue
     const isRoot = node.id === 'root'
-    const radius = isRoot ? 16 : 12
+    const radius = isRoot ? 18 : 8
+    ctx.shadowColor = 'rgba(32,33,36,.12)'
+    ctx.shadowBlur = isRoot ? 12 : 7
+    ctx.shadowOffsetY = isRoot ? 4 : 2
     ctx.fillStyle = node.color || (isRoot ? '#202124' : '#ffffff')
     roundRect(ctx, node.x, node.y, node.width, node.height, radius)
     ctx.fill()
-    ctx.strokeStyle = isRoot ? '#202124' : 'rgba(32,33,36,.18)'
-    ctx.lineWidth = isRoot ? 0 : 1.4
+    ctx.shadowColor = 'transparent'
+    ctx.shadowBlur = 0
+    ctx.shadowOffsetY = 0
+    ctx.strokeStyle = isRoot ? '#202124' : (node.branch === 'left' ? 'rgba(91,141,239,.35)' : 'rgba(55,168,107,.34)')
+    ctx.lineWidth = isRoot ? 0 : 1.2
     if (!isRoot) ctx.stroke()
 
     ctx.fillStyle = isRoot ? '#ffffff' : '#202124'
-    ctx.font = `${isRoot ? 700 : 600} ${mindmap.fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
+    ctx.font = `${isRoot ? 700 : 600} ${isRoot ? mindmap.fontSize + 1 : mindmap.fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     const lines = wrapTextLines(ctx, node.text, Math.max(1, node.width - 22)).slice(0, 2)
@@ -282,6 +292,8 @@ function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<Stro
     for (let i = 0; i < lines.length; i++) {
       ctx.fillText(lines[i], node.x + node.width / 2, startY + i * lineHeight)
     }
+
+    drawMindMapCollapseBadge(ctx, mindmap, node)
   }
 
   if (mindmap.failed) {
@@ -291,6 +303,35 @@ function drawMindMapElement(ctx: CanvasRenderingContext2D, mindmap: Extract<Stro
   }
 
   ctx.restore()
+}
+
+function drawMindMapCollapseBadge(
+  ctx: CanvasRenderingContext2D,
+  mindmap: Extract<StrokeData, { type: 'mindmap' }>,
+  node: Extract<StrokeData, { type: 'mindmap' }>['nodes'][number],
+) {
+  const childCount = getMindMapChildren(mindmap, node.id).length
+  if (childCount === 0) return
+  const branch = node.branch || 'right'
+  const cx = branch === 'left' ? node.x - 10 : node.x + node.width + 10
+  const cy = node.y + node.height / 2
+  ctx.beginPath()
+  ctx.arc(cx, cy, 9, 0, Math.PI * 2)
+  ctx.fillStyle = '#ffffff'
+  ctx.fill()
+  ctx.strokeStyle = branch === 'left' ? '#5b8def' : '#37a86b'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+  ctx.strokeStyle = '#202124'
+  ctx.lineWidth = 1.6
+  ctx.beginPath()
+  ctx.moveTo(cx - 4, cy)
+  ctx.lineTo(cx + 4, cy)
+  if (node.collapsed) {
+    ctx.moveTo(cx, cy - 4)
+    ctx.lineTo(cx, cy + 4)
+  }
+  ctx.stroke()
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {

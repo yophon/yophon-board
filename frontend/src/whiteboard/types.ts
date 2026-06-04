@@ -81,11 +81,14 @@ export interface MindMapNodeData {
   width: number
   height: number
   color?: string
+  branch?: 'left' | 'right'
+  collapsed?: boolean
 }
 
 export interface MindMapEdgeData {
   from: string
   to: string
+  stroke?: string
 }
 
 export interface MindMapElementData {
@@ -96,6 +99,8 @@ export interface MindMapElementData {
   height: number
   rotation?: number
   fontSize: number
+  layout?: 'mind'
+  theme?: 'drawnix'
   nodes: MindMapNodeData[]
   edges: MindMapEdgeData[]
 }

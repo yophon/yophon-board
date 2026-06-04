@@ -197,14 +197,14 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       fontSize > 72 ||
       !Array.isArray(stroke.nodes) ||
       stroke.nodes.length < 1 ||
-      stroke.nodes.length > 40 ||
+      stroke.nodes.length > 80 ||
       !Array.isArray(stroke.edges) ||
       stroke.edges.length > 80
     ) {
       return { ok: false, message: "思维导图尺寸不合法" };
     }
 
-    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string }> = [];
+    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string; branch?: "left" | "right"; collapsed?: boolean }> = [];
     const nodeIds = new Set<string>();
     for (const rawNode of stroke.nodes) {
       const id = typeof rawNode?.id === "string" ? rawNode.id.trim().slice(0, 40) : "";
@@ -237,17 +237,23 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
         width: Math.round(nodeWidth * 100) / 100,
         height: Math.round(nodeHeight * 100) / 100,
         color: typeof rawNode?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(rawNode.color) ? rawNode.color : undefined,
+        branch: rawNode?.branch === "left" ? "left" : rawNode?.branch === "right" ? "right" : undefined,
+        collapsed: rawNode?.collapsed === true,
       });
     }
 
-    const edges: Array<{ from: string; to: string }> = [];
+    const edges: Array<{ from: string; to: string; stroke?: string }> = [];
     for (const rawEdge of stroke.edges) {
       const from = typeof rawEdge?.from === "string" ? rawEdge.from.trim().slice(0, 40) : "";
       const to = typeof rawEdge?.to === "string" ? rawEdge.to.trim().slice(0, 40) : "";
       if (!nodeIds.has(from) || !nodeIds.has(to) || from === to) {
         return { ok: false, message: "思维导图连线不合法" };
       }
-      edges.push({ from, to });
+      edges.push({
+        from,
+        to,
+        stroke: typeof rawEdge?.stroke === "string" && /^#[0-9a-fA-F]{6}$/.test(rawEdge.stroke) ? rawEdge.stroke : undefined,
+      });
     }
 
     const normalizedMindMap = JSON.stringify({
@@ -258,6 +264,8 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       height: Math.round(height * 100) / 100,
       rotation: normalizeRotation(stroke.rotation),
       fontSize: Math.round(fontSize * 10) / 10,
+      layout: stroke.layout === "mind" ? "mind" : undefined,
+      theme: stroke.theme === "drawnix" ? "drawnix" : undefined,
       nodes,
       edges,
     });

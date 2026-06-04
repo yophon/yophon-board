@@ -51,6 +51,13 @@ export function isRectElement(element: CanvasStroke | StrokeData): element is Re
 }
 
 export function cloneElement(element: CanvasStroke): CanvasStroke {
+  if (element.type === 'mindmap') {
+    return {
+      ...element,
+      nodes: element.nodes.map(node => ({ ...node })),
+      edges: element.edges.map(edge => ({ ...edge })),
+    }
+  }
   if (isRectElement(element)) return { ...element }
   return {
     ...element,
