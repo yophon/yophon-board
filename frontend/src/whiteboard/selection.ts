@@ -162,12 +162,29 @@ export function worldToElementCenteredLocal(point: Point, geometry: ElementGeome
   }, -degreesToRadians(geometry.rotation))
 }
 
+/**
+ * Inverse of `worldToElementCenteredLocal` shifted to a top-left origin:
+ * `local` is measured from the element's unrotated top-left corner
+ * ((0,0)..(width,height)), not from its center.
+ */
 export function elementLocalToWorld(local: Point, geometry: ElementGeometry): Point {
   const rotated = rotatePoint({
     x: local.x - geometry.width / 2,
     y: local.y - geometry.height / 2,
   }, degreesToRadians(geometry.rotation))
   return { x: geometry.center.x + rotated.x, y: geometry.center.y + rotated.y }
+}
+
+/** World point → mind-map local coordinates (top-left origin, rotation-aware). */
+export function worldToMindMapLocal(point: Point, element: CanvasStroke): Point {
+  const geometry = getElementGeometry(element)
+  const local = worldToElementCenteredLocal(point, geometry)
+  return { x: local.x + geometry.width / 2, y: local.y + geometry.height / 2 }
+}
+
+/** Mind-map local coordinates (top-left origin) → world point. */
+export function mindMapLocalToWorld(element: CanvasStroke, point: Point): Point {
+  return elementLocalToWorld(point, getElementGeometry(element))
 }
 
 export function getElementGeometry(element: CanvasStroke): ElementGeometry {

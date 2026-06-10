@@ -5,18 +5,20 @@ import {
   serverConfig,
 } from "./config";
 import type { BoardRow, StrokeRow } from "./db";
+import { invalidId } from "./errors";
+import type { PublicBoard, PublicStrokeRow } from "../shared/types";
 
 export type CookieJar = Record<string, any>;
 
 export function parseId(value: string): number {
   const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) throw new Error("INVALID_ID");
+  if (!Number.isInteger(id) || id <= 0) throw invalidId();
   return id;
 }
 
 export function parsePage(value: unknown): number {
   const page = Number(value ?? 0);
-  if (!Number.isInteger(page) || page < 0 || page > 9999) throw new Error("INVALID_ID");
+  if (!Number.isInteger(page) || page < 0 || page > 9999) throw invalidId();
   return page;
 }
 
@@ -69,7 +71,7 @@ export function ensureClientId(cookie: CookieJar, request: Request): string {
   return next;
 }
 
-export function toPublicBoard(board: BoardRow) {
+export function toPublicBoard(board: BoardRow): PublicBoard {
   return {
     id: board.id,
     slug: board.slug,
@@ -79,7 +81,7 @@ export function toPublicBoard(board: BoardRow) {
   };
 }
 
-export function toPublicStroke(row: StrokeRow) {
+export function toPublicStroke(row: StrokeRow): PublicStrokeRow {
   return {
     id: row.id,
     page: row.page,

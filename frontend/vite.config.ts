@@ -14,5 +14,9 @@ export default defineConfig({
     proxy: {
       '/api': 'http://localhost:3020',
     },
+    fs: {
+      // The frontend imports wire types from ../shared/types.ts.
+      allow: [fileURLToPath(new URL('..', import.meta.url))],
+    },
   },
 })

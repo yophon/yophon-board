@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 
 export const SESSION_COOKIE = "yophon_board_session";
 export const CLIENT_ID_COOKIE = "yophon_board_cid";
+/** Both API prefixes serve the same board routes; /api/boards is the legacy alias. */
+export const BOARD_API_PREFIXES = ["/api/projects", "/api/boards"] as const;
 export const CLIENT_ID_MAX_AGE = 365 * 24 * 60 * 60;
 export const INTERNAL_REMOTE_IP_HEADER = "x-yophon-remote-ip";
 

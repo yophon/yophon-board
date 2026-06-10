@@ -297,60 +297,41 @@ import {
   getCenter,
   getDistance,
 } from '../whiteboard/geometry'
-import { ensureLegacyClientId, loadPendingStrokes, savePendingStrokes } from '../whiteboard/pendingStorage'
+import { ensureLegacyClientId, loadPendingStrokes } from '../whiteboard/pendingStorage'
 import { drawStrokes } from '../whiteboard/renderer'
 import {
   MINDMAP_MAX_NODES,
   addMindMapChildNode,
   addMindMapSiblingNode,
   createDrawnixMindMapTemplate,
-  createMindMapNodeId as createMindMapNodeIdFromTree,
+  getMindMapChildren,
   deleteMindMapNodeById,
-  findMindMapParentId as findMindMapParentIdFromTree,
-  getMindMapChildren as getMindMapChildrenFromTree,
-  getMindMapDescendantIds as getMindMapDescendantIdsFromTree,
   getNearestMindMapNodeId,
   getVisibleMindMapNodeIds,
-  layoutMindMap as layoutMindMapTree,
   normalizeMindMap,
   toggleMindMapNodeCollapsed,
 } from '../whiteboard/mindmap'
 import type { PdfCache } from '../whiteboard/pdfRenderer'
 import { probePdf } from '../whiteboard/pdfRenderer'
 import {
-  applyElementTransform,
-  cloneElement,
-  elementIntersectsBox,
-  elementLocalToWorld,
   elementKey,
-  getElementGeometry,
   getElementHandlePoints,
   getElementWorldCorners,
   getHandleSize,
   getInteractiveGeometry,
   getSelectionGeometry,
-  hitTestElements as hitTestSelectionElements,
   isDrawingStroke,
   isRectElement,
-  worldToElementCenteredLocal,
+  mindMapLocalToWorld,
+  worldToMindMapLocal,
   type DrawingStroke,
-  type ElementGeometry,
-  type ElementTransformState,
-  type RectElementStroke,
   type TextStroke,
-  type TransformMode,
 } from '../whiteboard/selection'
-import {
-  applySavedRow,
-  createLocalStroke,
-  parseStrokeRow,
-  persistableStroke,
-} from '../whiteboard/strokeModel'
+import { createLocalStroke } from '../whiteboard/strokeModel'
 import {
   DEFAULT_TEXT_FONT_SIZE,
   DEFAULT_TEXT_WIDTH,
   TEXT_FONT_FAMILY,
-  clampTextFontSize,
   measureTextBox,
 } from '../whiteboard/textLayout'
 import type {
@@ -360,15 +341,16 @@ import type {
   MindMapNodeData,
   Point,
   StrokeData,
-  TextElementData,
-  StrokeRow,
   UploadedImageAsset,
-  WhiteboardWsMessage,
 } from '../whiteboard/types'
 import { useWhiteboardSocket } from '../composables/useWhiteboardSocket'
 import { useWhiteboardFullscreen } from '../composables/useWhiteboardFullscreen'
 import { useWhiteboardViewport } from '../composables/useWhiteboardViewport'
 import { useWhiteboardTextEditor, type TextEditorCommit } from '../composables/useWhiteboardTextEditor'
+import { useWhiteboardHistory } from '../composables/useWhiteboardHistory'
+import { useWhiteboardSelection } from '../composables/useWhiteboardSelection'
+import { useWhiteboardPersist } from '../composables/useWhiteboardPersist'
+import { useWhiteboardSync } from '../composables/useWhiteboardSync'
 
 const props = withDefaults(defineProps<{
   boardSlug?: string
@@ -397,8 +379,14 @@ const {
   getViewportWorldBounds,
 } = useWhiteboardViewport({
   canvasRef,
-  onChange: () => renderFrame(),
+  onChange: () => {
+    invalidateScene()
+    requestRender()
+  },
 })
+
+type WhiteboardTool = 'pen' | 'eraser' | 'drag' | 'select' | 'text'
+type EraserMode = 'mask' | 'delete' | 'cut'
 
 const isDrawing = ref(false)
 const isPanning = ref(false)
@@ -406,7 +394,6 @@ const isErasing = ref(false)
 const currentPage = ref(0)
 const currentStroke = ref<DrawingStrokeData | null>(null)
 const allStrokes = ref<CanvasStroke[]>([])
-const localUndoStack = ref<CanvasStroke[]>([])
 const lastSyncedId = ref(0)
 
 const currentColor = ref('#202124')
@@ -414,18 +401,14 @@ const currentWidth = ref(3)
 const currentTool = ref<WhiteboardTool>('pen')
 const spaceHeld = ref(false)
 const saveError = ref('')
-const retryTimer = ref<number | null>(null)
 const touchPointers = new Map<number, Point>()
 let frameRequest: number | null = null
-let unmounted = false
+let statusTimer: number | null = null
 let pinchDistance = 0
 let pinchCenter: Point | null = null
 let pinchActive = false
 let resizeObserver: ResizeObserver | null = null
 let lastErasePoint: Point | null = null
-const pendingEraseIds = new Set<number>()
-const pendingEraseUpdateKeys = new Set<string>()
-const erasedPendingKeys = new Set<string>()
 const imageCache = new Map<string, HTMLImageElement | 'loading' | 'error'>()
 const pdfCache: PdfCache = new Map()
 
@@ -442,30 +425,70 @@ const eraserWidth = ref(20)
 const eraserMode = ref<EraserMode>('mask')
 const eraserMenuOpen = ref(false)
 
-type WhiteboardTool = 'pen' | 'eraser' | 'drag' | 'select' | 'text'
-type EraserMode = 'mask' | 'delete' | 'cut'
-interface MindMapNodeDragState {
-  element: MindMapElementData & CanvasStroke
-  nodeId: string
-  startPointer: Point
-  startNode: MindMapNodeData
-}
+// —— composables: selection, history, persistence, sync ——
 
-const selectedElementKeys = ref<string[]>([])
-const selectedMindMapNodeId = ref<string | null>(null)
-const isElementTransforming = ref(false)
-const isMindMapNodeDragging = ref(false)
-const isBoxSelecting = ref(false)
-const selectionBoxStart = ref<Point | null>(null)
-const selectionBoxEnd = ref<Point | null>(null)
-let elementTransform: ElementTransformState | null = null
-let mindMapNodeDrag: MindMapNodeDragState | null = null
+const selection = useWhiteboardSelection({ strokes: allStrokes, scale })
+const {
+  selectedElementKeys,
+  selectedMindMapNodeId,
+  isElementTransforming,
+  isMindMapNodeDragging,
+  isBoxSelecting,
+  selectionBoxStart,
+  selectionBoxEnd,
+  getSelectedElements,
+  setSelectedElements,
+  isElementSelected,
+  clearSelection,
+} = selection
+
+const history = useWhiteboardHistory()
+const canUndo = history.canUndo
+
+const persist = useWhiteboardPersist({
+  boardSlug: () => props.boardSlug,
+  currentPage,
+  strokes: allStrokes,
+  lastSyncedId,
+  setStatus: (message) => { saveError.value = message },
+  notifyStrokesChanged,
+  onStrokeKeyChanged: (previousKey, nextKey) => selection.remapKey(previousKey, nextKey),
+})
+const failedCount = persist.failedCount
+
+const sync = useWhiteboardSync({
+  boardSlug: () => props.boardSlug,
+  currentPage,
+  strokes: allStrokes,
+  lastSyncedId,
+  prepareStroke: prepareStrokeForBoard,
+  isElementSyncBlocked: (element) =>
+    persist.isElementSyncBusy(element) ||
+    selection.isElementInteracting(element) ||
+    isEditorEditingElement(element),
+  isIdDiscarded: persist.isIdDiscarded,
+  consumeDiscardedLocalId: persist.consumeDiscardedLocalId,
+  eraseRemoteId: (id, page) => {
+    persist.queueEraseId(id, page)
+    void persist.flushPendingEraseChanges()
+  },
+  onPendingMirrorChanged: persist.persistPendingMirror,
+  onStrokesCleared: () => {
+    history.clear()
+    clearSelection()
+  },
+  onStrokeDeleted: (id) => {
+    history.removeById(id)
+    selection.dropKey(`id:${id}`)
+  },
+  notifyStrokesChanged,
+  setStatus: (message) => { saveError.value = message },
+})
 
 const {
   editor: textEditor,
   beginInsertion: beginTextInsertionState,
   beginEdit: beginTextEditState,
-  focusEditor: focusTextEditor,
   onInput: onTextEditorInput,
   onKeyDown: onTextEditorKeyDown,
   onBlur: onTextEditorBlur,
@@ -476,37 +499,34 @@ const {
   toggleStyle: toggleTextEditorStyle,
   setAlign: setTextEditorAlign,
   commit: commitTextEditor,
-  cancel: cancelTextEditor,
 } = useWhiteboardTextEditor({
   textEditorRef,
   textToolbarRef,
   measureBox: (text, fontSize, width, bold, italic) => measureInsertedText(text, fontSize, width, bold, italic),
   onCommit: applyTextEditorCommit,
-  onChange: () => renderFrame(),
+  onChange: () => requestRender(),
 })
 
 // `connectSocket` returns the ref-backed `wsState` that templates and
 // computeds read; the actual connect/reconnect lifecycle lives in the
-// composable. Callbacks below are arrow functions so they pick up the
-// later-declared `handleSocketMessage` / `loadExistingStrokes` / etc. via
-// closure at the moment a message or open event fires.
+// composable. Callbacks are arrow functions so they resolve `sync` /
+// `persist` via closure at the moment a message or open event fires.
 const { wsState, connect: connectSocket } = useWhiteboardSocket({
   url: () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     return `${protocol}//${window.location.host}/api/projects/${props.boardSlug}/ws`
   },
   onOpen: () => {
-    void loadExistingStrokes(lastSyncedId.value > 0)
-    void flushPendingStrokes()
+    void sync.loadExistingStrokes(lastSyncedId.value > 0)
+    void persist.flushPendingStrokes()
   },
-  onMessage: (event) => handleSocketMessage(event),
+  onMessage: (event) => sync.handleSocketMessage(event),
 })
 
 const {
   isFullscreen,
   isWebFullscreen,
   fullscreenTitle,
-  toggleFullscreen,
   startFullscreenPress,
   finishFullscreenPress,
   cancelFullscreenPress,
@@ -516,8 +536,8 @@ const {
   onError: (message) => { saveError.value = message },
 })
 
-const failedCount = computed(() => allStrokes.value.filter(s => s.failed && !s.id).length)
-const canUndo = computed(() => localUndoStack.value.length > 0)
+// —— computeds ——
+
 const canvasCursor = computed(() => {
   if (isMindMapNodeDragging.value) return 'grabbing'
   if (isElementTransforming.value) return 'grabbing'
@@ -626,6 +646,39 @@ const statusMessage = computed(() => {
 })
 const isMindMapTextEditor = computed(() => textEditor.value?.key?.includes('::') ?? false)
 
+// —— helpers ——
+
+function showTransientStatus(message: string, duration = 1600) {
+  saveError.value = message
+  if (statusTimer) window.clearTimeout(statusTimer)
+  statusTimer = window.setTimeout(() => {
+    statusTimer = null
+    if (saveError.value === message) saveError.value = ''
+  }, duration)
+}
+
+function prepareStrokeForBoard(stroke: CanvasStroke): CanvasStroke {
+  if (stroke.type === 'mindmap') normalizeMindMap(stroke)
+  return stroke
+}
+
+function isEditorEditingElement(element: CanvasStroke): boolean {
+  const key = textEditor.value?.key
+  if (!key) return false
+  const elKey = elementKey(element)
+  return key === elKey || key.startsWith(`${elKey}::`)
+}
+
+function getEditingMindMapNode() {
+  const key = textEditor.value?.key
+  if (!key?.includes('::')) return null
+  const [elementKeyPart, nodeId] = key.split('::')
+  if (!elementKeyPart || !nodeId) return null
+  return { elementKey: elementKeyPart, nodeId }
+}
+
+// —— tools ——
+
 function selectPreset(i: number) {
   activePresetIndex.value = i
   currentColor.value = presets.value[i].color
@@ -643,7 +696,7 @@ function setTool(tool: WhiteboardTool) {
   if (tool === 'eraser') currentWidth.value = eraserWidth.value
   if (tool !== 'eraser') eraserMenuOpen.value = false
   if (tool !== 'select') clearSelection()
-  renderFrame()
+  requestRender()
 }
 
 function toggleEraserMenu() {
@@ -655,18 +708,6 @@ function selectEraserMode(mode: EraserMode) {
   eraserMode.value = mode
   eraserMenuOpen.value = false
   setTool('eraser')
-}
-
-function clearSelection() {
-  selectedElementKeys.value = []
-  selectedMindMapNodeId.value = null
-  isElementTransforming.value = false
-  isMindMapNodeDragging.value = false
-  isBoxSelecting.value = false
-  selectionBoxStart.value = null
-  selectionBoxEnd.value = null
-  elementTransform = null
-  mindMapNodeDrag = null
 }
 
 function updatePreset(key: 'color' | 'width', value: string | number) {
@@ -685,6 +726,8 @@ function onWidthInput(val: number) {
     updatePreset('width', val)
   }
 }
+
+// —— pinch gesture ——
 
 function getPinchPoints(): Point[] {
   return Array.from(touchPointers.values()).slice(0, 2)
@@ -719,7 +762,8 @@ function updatePinchGesture() {
 
   pinchDistance = nextDistance
   pinchCenter = nextCenter
-  renderFrame()
+  invalidateScene()
+  requestRender()
 }
 
 function endPinchGestureIfNeeded() {
@@ -732,17 +776,50 @@ function endPinchGestureIfNeeded() {
   }
 }
 
-function renderFrame() {
-  const canvas = canvasRef.value
-  if (!canvas) return
-  const ctx = canvas.getContext('2d')!
-  const rect = canvas.getBoundingClientRect()
-  const dpr = window.devicePixelRatio || 1
-  const w = rect.width
-  const h = rect.height
+// —— rendering ——
 
+const drawOptions = {
+  imageCache,
+  pdfCache,
+  scheduleRender: () => {
+    invalidateScene()
+    requestRender()
+  },
+}
+
+let sceneCanvas: HTMLCanvasElement | null = null
+let sceneCacheValid = false
+
+function invalidateScene() {
+  sceneCacheValid = false
+}
+
+/** Stroke data changed: drop render caches and repaint. */
+function notifyStrokesChanged() {
+  invalidateScene()
+  requestRender()
+}
+
+function requestRender() {
+  if (frameRequest !== null) return
+  frameRequest = window.requestAnimationFrame(() => {
+    frameRequest = null
+    renderFrame()
+  })
+}
+
+/** Clear + grid + strokes, in world space, onto the given context. */
+function paintScene(
+  ctx: CanvasRenderingContext2D,
+  deviceWidth: number,
+  deviceHeight: number,
+  cssWidth: number,
+  cssHeight: number,
+  dpr: number,
+  strokesToDraw: (CanvasStroke | DrawingStrokeData)[],
+) {
   ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.clearRect(0, 0, deviceWidth, deviceHeight)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   ctx.save()
@@ -751,8 +828,8 @@ function renderFrame() {
   const gridSize = 40
   const startX = Math.floor(-offsetX.value / scale.value / gridSize) * gridSize - gridSize
   const startY = Math.floor(-offsetY.value / scale.value / gridSize) * gridSize - gridSize
-  const endX = startX + w / scale.value + gridSize * 2
-  const endY = startY + h / scale.value + gridSize * 2
+  const endX = startX + cssWidth / scale.value + gridSize * 2
+  const endY = startY + cssHeight / scale.value + gridSize * 2
   ctx.fillStyle = 'rgba(0,0,0,0.08)'
   for (let x = startX; x < endX; x += gridSize) {
     for (let y = startY; y < endY; y += gridSize) {
@@ -763,45 +840,60 @@ function renderFrame() {
   }
   ctx.restore()
 
+  ctx.save()
+  ctx.translate(offsetX.value, offsetY.value)
+  ctx.scale(scale.value, scale.value)
+  drawStrokes(ctx, strokesToDraw, drawOptions)
+  ctx.restore()
+}
+
+function renderFrame() {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')!
+  const rect = canvas.getBoundingClientRect()
+  const dpr = window.devicePixelRatio || 1
+
   const editingMindMapNode = getEditingMindMapNode()
-  const allToDraw = allStrokes.value.map(stroke => {
+  const staticStrokes = allStrokes.value.map(stroke => {
     if (editingMindMapNode && stroke.type === 'mindmap' && elementKey(stroke) === editingMindMapNode.elementKey) {
       return { ...stroke, editingNodeId: editingMindMapNode.nodeId }
     }
     return stroke
   })
-  if (currentStroke.value) allToDraw.push(currentStroke.value)
 
-  ctx.save()
-  ctx.translate(offsetX.value, offsetY.value)
-  ctx.scale(scale.value, scale.value)
-
-  drawStrokes(ctx, allToDraw, { imageCache, pdfCache, scheduleRender })
-  drawSelectedElementOverlay(ctx)
-  drawSelectionBox(ctx)
-  ctx.restore()
-  renderMiniMap()
-}
-
-function prepareStrokeForBoard(stroke: CanvasStroke): CanvasStroke {
-  if (stroke.type === 'mindmap') normalizeMindMap(stroke)
-  return stroke
-}
-
-function getEditingMindMapNode() {
-  const key = textEditor.value?.key
-  if (!key?.includes('::')) return null
-  const [elementKeyPart, nodeId] = key.split('::')
-  if (!elementKeyPart || !nodeId) return null
-  return { elementKey: elementKeyPart, nodeId }
-}
-
-function scheduleRender() {
-  if (frameRequest !== null) return
-  frameRequest = window.requestAnimationFrame(() => {
-    frameRequest = null
-    renderFrame()
-  })
+  if (isDrawing.value && currentStroke.value) {
+    // Hot path: while a pen / mask-eraser stroke is in progress, the static
+    // scene can't change (pan/zoom and selection are mutually exclusive
+    // with drawing), so it's painted once into an offscreen layer and only
+    // the live stroke is drawn per frame. Heavy boards stay responsive.
+    if (!sceneCacheValid || !sceneCanvas || sceneCanvas.width !== canvas.width || sceneCanvas.height !== canvas.height) {
+      sceneCanvas = sceneCanvas ?? document.createElement('canvas')
+      sceneCanvas.width = canvas.width
+      sceneCanvas.height = canvas.height
+      paintScene(sceneCanvas.getContext('2d')!, canvas.width, canvas.height, rect.width, rect.height, dpr, staticStrokes)
+      sceneCacheValid = true
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(sceneCanvas, 0, 0)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.save()
+    ctx.translate(offsetX.value, offsetY.value)
+    ctx.scale(scale.value, scale.value)
+    drawStrokes(ctx, [currentStroke.value], drawOptions)
+    ctx.restore()
+  } else {
+    sceneCacheValid = false
+    paintScene(ctx, canvas.width, canvas.height, rect.width, rect.height, dpr, staticStrokes)
+    ctx.save()
+    ctx.translate(offsetX.value, offsetY.value)
+    ctx.scale(scale.value, scale.value)
+    drawSelectedElementOverlay(ctx)
+    drawSelectionBox(ctx)
+    ctx.restore()
+  }
+  requestMiniMapRender()
 }
 
 function drawSelectedElementOverlay(ctx: CanvasRenderingContext2D) {
@@ -900,29 +992,146 @@ function drawSelectionBox(ctx: CanvasRenderingContext2D) {
   ctx.restore()
 }
 
-function getSelectedElements(): CanvasStroke[] {
-  const keys = new Set(selectedElementKeys.value)
-  if (keys.size === 0) return []
-  return allStrokes.value.filter(stroke => keys.has(elementKey(stroke)))
-}
+// —— mini map ——
 
-function setSelectedElements(elements: CanvasStroke[]) {
-  selectedElementKeys.value = elements.map(elementKey)
-  if (elements.length !== 1 || elements[0].type !== 'mindmap') selectedMindMapNodeId.value = null
-  else if (selectedMindMapNodeId.value && !elements[0].nodes.some(node => node.id === selectedMindMapNodeId.value)) {
-    selectedMindMapNodeId.value = null
-  } else if (!selectedMindMapNodeId.value) {
-    selectedMindMapNodeId.value = 'root'
+const MINI_MAP_REPAINT_MS = 160
+let miniMapTimer: number | null = null
+let miniMapLastPaint = 0
+
+/** The mini map redraws every stroke, so it repaints at most ~6 fps. */
+function requestMiniMapRender() {
+  const now = performance.now()
+  const elapsed = now - miniMapLastPaint
+  if (elapsed >= MINI_MAP_REPAINT_MS) {
+    miniMapLastPaint = now
+    renderMiniMap()
+    return
   }
+  if (miniMapTimer !== null) return
+  miniMapTimer = window.setTimeout(() => {
+    miniMapTimer = null
+    miniMapLastPaint = performance.now()
+    renderMiniMap()
+  }, MINI_MAP_REPAINT_MS - elapsed)
 }
 
-function isElementSelected(element: CanvasStroke) {
-  return selectedElementKeys.value.includes(elementKey(element))
+function getStrokeBounds(strokes: StrokeData[]) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const stroke of strokes) {
+    if (isRectElement(stroke)) {
+      for (const corner of getElementWorldCorners(stroke)) {
+        minX = Math.min(minX, corner.x)
+        minY = Math.min(minY, corner.y)
+        maxX = Math.max(maxX, corner.x)
+        maxY = Math.max(maxY, corner.y)
+      }
+    } else if (isDrawingStroke(stroke)) {
+      for (const point of stroke.points) {
+        minX = Math.min(minX, point.x)
+        minY = Math.min(minY, point.y)
+        maxX = Math.max(maxX, point.x)
+        maxY = Math.max(maxY, point.y)
+      }
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    minX = -200
+    minY = -120
+    maxX = 200
+    maxY = 120
+  }
+
+  const viewport = getViewportWorldBounds()
+  minX = Math.min(minX, viewport.minX)
+  minY = Math.min(minY, viewport.minY)
+  maxX = Math.max(maxX, viewport.maxX)
+  maxY = Math.max(maxY, viewport.maxY)
+
+  const padding = 80
+  return { minX: minX - padding, minY: minY - padding, maxX: maxX + padding, maxY: maxY + padding }
 }
 
-function hitTestElements(point: Point) {
-  return hitTestSelectionElements(point, allStrokes.value, getSelectedElements(), scale.value)
+function renderMiniMap() {
+  const mini = miniMapRef.value
+  if (!mini) return
+  const ctx = mini.getContext('2d')!
+  const w = mini.width
+  const h = mini.height
+  ctx.clearRect(0, 0, w, h)
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'
+  ctx.fillRect(0, 0, w, h)
+
+  const bounds = getStrokeBounds(allStrokes.value)
+  const bw = Math.max(1, bounds.maxX - bounds.minX)
+  const bh = Math.max(1, bounds.maxY - bounds.minY)
+  const mapScale = Math.min((w - 16) / bw, (h - 16) / bh)
+  const ox = (w - bw * mapScale) / 2
+  const oy = (h - bh * mapScale) / 2
+
+  ctx.save()
+  ctx.translate(ox - bounds.minX * mapScale, oy - bounds.minY * mapScale)
+  ctx.scale(mapScale, mapScale)
+  drawStrokes(ctx, allStrokes.value, drawOptions)
+  ctx.restore()
+
+  const view = getViewportWorldBounds()
+  ctx.strokeStyle = '#202124'
+  ctx.lineWidth = 1.5
+  ctx.strokeRect(
+    ox + (view.minX - bounds.minX) * mapScale,
+    oy + (view.minY - bounds.minY) * mapScale,
+    (view.maxX - view.minX) * mapScale,
+    (view.maxY - view.minY) * mapScale,
+  )
 }
+
+function onMiniMapPointer(e: PointerEvent) {
+  const mini = miniMapRef.value
+  const canvas = canvasRef.value
+  if (!mini || !canvas) return
+  const rect = mini.getBoundingClientRect()
+  const bounds = getStrokeBounds(allStrokes.value)
+  const bw = Math.max(1, bounds.maxX - bounds.minX)
+  const bh = Math.max(1, bounds.maxY - bounds.minY)
+  const mapScale = Math.min((mini.width - 16) / bw, (mini.height - 16) / bh)
+  const ox = (mini.width - bw * mapScale) / 2
+  const oy = (mini.height - bh * mapScale) / 2
+  const worldX = bounds.minX + ((e.clientX - rect.left) / rect.width * mini.width - ox) / mapScale
+  const worldY = bounds.minY + ((e.clientY - rect.top) / rect.height * mini.height - oy) / mapScale
+  centerOnWorldPoint({ x: worldX, y: worldY })
+}
+
+function scheduleResizeCanvas() {
+  void nextTick(() => {
+    window.requestAnimationFrame(() => {
+      resizeCanvas()
+      window.setTimeout(resizeCanvas, 80)
+    })
+  })
+}
+
+function resizeCanvas() {
+  const canvas = canvasRef.value
+  const wrap = wrapRef.value
+  if (!canvas || !wrap) return
+  const dpr = window.devicePixelRatio || 1
+  const rect = wrap.getBoundingClientRect()
+  const cssWidth = Math.max(1, Math.round(rect.width))
+  const cssHeight = Math.max(1, Math.round(rect.height))
+  const pixelWidth = Math.max(1, Math.floor(cssWidth * dpr))
+  const pixelHeight = Math.max(1, Math.floor(cssHeight * dpr))
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight
+  canvas.style.width = cssWidth + 'px'
+  canvas.style.height = cssHeight + 'px'
+  invalidateScene()
+  renderFrame()
+}
+
+// —— pointer events ——
 
 function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: MindMapElementData & CanvasStroke; node: MindMapNodeData } | null {
   const candidates = element
@@ -946,25 +1155,6 @@ function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: Mi
     }
   }
   return null
-}
-
-function updateMindMapNodeDrag(worldPoint: Point) {
-  if (!mindMapNodeDrag || mindMapNodeDrag.element.type !== 'mindmap') return
-  const element = mindMapNodeDrag.element
-  const node = element.nodes.find(item => item.id === mindMapNodeDrag?.nodeId)
-  if (!node) return
-  const local = worldToMindMapLocal(worldPoint, element)
-  const dx = local.x - mindMapNodeDrag.startPointer.x
-  const dy = local.y - mindMapNodeDrag.startPointer.y
-  node.x = Math.max(8, mindMapNodeDrag.startNode.x + dx)
-  node.y = Math.max(8, mindMapNodeDrag.startNode.y + dy)
-  node.manualPosition = true
-  if (node.id !== 'root') {
-    const root = element.nodes.find(item => item.id === 'root')
-    if (root) node.branch = node.x + node.width / 2 < root.x + root.width / 2 ? 'left' : 'right'
-  }
-  layoutMindMap(element)
-  selectedMindMapNodeId.value = node.id
 }
 
 function onPointerDown(e: PointerEvent) {
@@ -1002,44 +1192,24 @@ function onPointerDown(e: PointerEvent) {
   const nodeHit = currentTool.value === 'select' ? hitTestMindMapNode(worldPoint) : null
   if (nodeHit) {
     e.preventDefault()
-    selectedMindMapNodeId.value = nodeHit.node.id
-    if (!isElementSelected(nodeHit.element)) setSelectedElements([nodeHit.element])
-    isMindMapNodeDragging.value = true
-    mindMapNodeDrag = {
-      element: nodeHit.element,
-      nodeId: nodeHit.node.id,
-      startPointer: worldToMindMapLocal(worldPoint, nodeHit.element),
-      startNode: { ...nodeHit.node },
-    }
-    renderFrame()
+    selection.beginNodeDrag(nodeHit.element, nodeHit.node.id, worldPoint)
+    requestRender()
     return
   }
 
-  const hit = currentTool.value === 'select' ? hitTestElements(worldPoint) : null
+  const hit = currentTool.value === 'select' ? selection.hitTest(worldPoint) : null
   if (hit) {
     e.preventDefault()
     if (!isElementSelected(hit.element)) setSelectedElements([hit.element])
     if (hit.element.type !== 'mindmap') selectedMindMapNodeId.value = null
-    const selected = getSelectedElements()
-    const geometry = getInteractiveGeometry(getSelectionGeometry(selected), scale.value)
-    isElementTransforming.value = true
-    elementTransform = {
-      mode: hit.mode,
-      startPointer: worldPoint,
-      startElements: selected.map(cloneElement),
-      startGeometry: geometry,
-      startAngle: Math.atan2(worldPoint.y - geometry.center.y, worldPoint.x - geometry.center.x),
-    }
-    renderFrame()
+    selection.beginTransform(hit.mode, worldPoint)
+    requestRender()
     return
   }
 
   if (currentTool.value === 'select') {
-    clearSelection()
-    isBoxSelecting.value = true
-    selectionBoxStart.value = worldPoint
-    selectionBoxEnd.value = worldPoint
-    renderFrame()
+    selection.beginBoxSelect(worldPoint)
+    requestRender()
     return
   }
 
@@ -1058,7 +1228,7 @@ function onPointerDown(e: PointerEvent) {
       isErasing.value = true
       lastErasePoint = worldPoint
       eraseBetween(worldPoint, worldPoint)
-      renderFrame()
+      notifyStrokesChanged()
     }
     return
   }
@@ -1083,28 +1253,29 @@ function onPointerMove(e: PointerEvent) {
     }
   }
 
-  if (isElementTransforming.value && elementTransform) {
-    applyElementTransform(screenToWorld(e.clientX, e.clientY), elementTransform, allStrokes.value)
-    renderFrame()
+  if (isElementTransforming.value) {
+    selection.updateTransform(screenToWorld(e.clientX, e.clientY))
+    notifyStrokesChanged()
     return
   }
 
-  if (isMindMapNodeDragging.value && mindMapNodeDrag) {
-    updateMindMapNodeDrag(screenToWorld(e.clientX, e.clientY))
-    renderFrame()
+  if (isMindMapNodeDragging.value) {
+    selection.updateNodeDrag(screenToWorld(e.clientX, e.clientY))
+    notifyStrokesChanged()
     return
   }
 
   if (isBoxSelecting.value) {
-    selectionBoxEnd.value = screenToWorld(e.clientX, e.clientY)
-    renderFrame()
+    selection.updateBoxSelect(screenToWorld(e.clientX, e.clientY))
+    requestRender()
     return
   }
 
   if (isPanning.value) {
     offsetX.value += e.movementX
     offsetY.value += e.movementY
-    renderFrame()
+    invalidateScene()
+    requestRender()
     return
   }
 
@@ -1112,14 +1283,14 @@ function onPointerMove(e: PointerEvent) {
     const pt = screenToWorld(e.clientX, e.clientY)
     eraseBetween(lastErasePoint || pt, pt)
     lastErasePoint = pt
-    renderFrame()
+    notifyStrokesChanged()
     return
   }
 
   if (!isDrawing.value || !currentStroke.value) return
   const pt = screenToWorld(e.clientX, e.clientY)
   currentStroke.value.points.push(pt)
-  scheduleRender()
+  requestRender()
 }
 
 function onPointerUp(e: PointerEvent) {
@@ -1137,34 +1308,28 @@ function onPointerUp(e: PointerEvent) {
   }
 
   if (isElementTransforming.value) {
-    isElementTransforming.value = false
-    const elements = getSelectedElements()
-    elementTransform = null
-    for (const element of elements) void saveElementTransform(element)
+    for (const element of selection.endTransform()) {
+      void persist.saveElementTransform(element)
+    }
     return
   }
 
   if (isMindMapNodeDragging.value) {
-    const element = mindMapNodeDrag?.element
-    isMindMapNodeDragging.value = false
-    mindMapNodeDrag = null
-    if (element) void saveElementTransform(element)
+    const element = selection.endNodeDrag()
+    if (element) void persist.saveElementTransform(element)
     return
   }
 
   if (isBoxSelecting.value) {
-    isBoxSelecting.value = false
-    selectElementsInBox()
-    selectionBoxStart.value = null
-    selectionBoxEnd.value = null
-    renderFrame()
+    selection.endBoxSelect()
+    requestRender()
     return
   }
 
   if (isErasing.value) {
     isErasing.value = false
     lastErasePoint = null
-    void flushPendingEraseChanges()
+    void persist.flushPendingEraseChanges()
     return
   }
 
@@ -1174,17 +1339,17 @@ function onPointerUp(e: PointerEvent) {
   if (currentStroke.value.points.length >= 2) {
     const stroke = createLocalStroke(currentStroke.value, currentPage.value)
     allStrokes.value.push(stroke)
-    localUndoStack.value.push(stroke)
-    void saveStroke(stroke)
+    history.push(stroke)
+    void persist.saveStroke(stroke)
   }
   currentStroke.value = null
-  renderFrame()
+  notifyStrokesChanged()
 }
 
 function onCanvasDoubleClick(e: MouseEvent) {
   if (currentTool.value !== 'select') return
   const worldPoint = screenToWorld(e.clientX, e.clientY)
-  const hit = hitTestElements(worldPoint)
+  const hit = selection.hitTest(worldPoint)
   if (!hit) return
 
   setSelectedElements([hit.element])
@@ -1198,27 +1363,7 @@ function onCanvasDoubleClick(e: MouseEvent) {
   }
 }
 
-function selectElementsInBox() {
-  const start = selectionBoxStart.value
-  const end = selectionBoxEnd.value
-  if (!start || !end) return
-  const left = Math.min(start.x, end.x)
-  const right = Math.max(start.x, end.x)
-  const top = Math.min(start.y, end.y)
-  const bottom = Math.max(start.y, end.y)
-  const minSize = 4 / scale.value
-
-  if (right - left < minSize && bottom - top < minSize) {
-    clearSelection()
-    return
-  }
-
-  const selected = allStrokes.value.filter(stroke => {
-    if (isDrawingStroke(stroke) && stroke.tool === 'eraser') return false
-    return elementIntersectsBox(stroke, { left, right, top, bottom }, scale.value)
-  })
-  setSelectedElements(selected)
-}
+// —— eraser (delete / cut modes) ——
 
 function eraseBetween(from: Point, to: Point) {
   if (eraserMode.value === 'delete') {
@@ -1231,7 +1376,6 @@ function eraseBetween(from: Point, to: Point) {
 function eraseWholeStrokesBetween(from: Point, to: Point) {
   const radius = Math.max(1, currentWidth.value / 2)
   const removedKeys = new Set<string>()
-  const removedIds: number[] = []
   const nextStrokes: CanvasStroke[] = []
 
   for (const stroke of allStrokes.value) {
@@ -1240,25 +1384,23 @@ function eraseWholeStrokesBetween(from: Point, to: Point) {
       continue
     }
 
-    const key = elementKey(stroke)
-    removedKeys.add(key)
-    if (stroke.retryTimer) window.clearTimeout(stroke.retryTimer)
-    if (stroke.id) removedIds.push(stroke.id)
-    else erasedPendingKeys.add(key)
+    removedKeys.add(elementKey(stroke))
+    if (stroke.id) persist.queueEraseId(stroke.id, stroke.page ?? currentPage.value)
+    else persist.markUnsavedStrokeDiscarded(stroke)
   }
 
   if (removedKeys.size === 0) return
   allStrokes.value = nextStrokes
-  localUndoStack.value = localUndoStack.value.filter(stroke => !removedKeys.has(elementKey(stroke)))
+  history.removeByKeys(removedKeys)
   if (selectedElementKeys.value.some(key => removedKeys.has(key))) clearSelection()
-  for (const id of removedIds) pendingEraseIds.add(id)
+  persist.persistPendingMirror()
 }
 
 function eraseCutSegmentsBetween(from: Point, to: Point) {
   const radius = Math.max(1, currentWidth.value / 2)
   const removedKeys = new Set<string>()
-  const removedIds: number[] = []
   const nextStrokes: CanvasStroke[] = []
+  let changed = false
 
   for (const stroke of allStrokes.value) {
     if (!isDrawingStroke(stroke) || stroke.tool === 'eraser') {
@@ -1271,36 +1413,35 @@ function eraseCutSegmentsBetween(from: Point, to: Point) {
       nextStrokes.push(stroke)
       continue
     }
+    changed = true
 
-    const key = elementKey(stroke)
     if (segments.length === 0) {
-      removedKeys.add(key)
-      if (stroke.retryTimer) window.clearTimeout(stroke.retryTimer)
-      if (stroke.id) removedIds.push(stroke.id)
-      else erasedPendingKeys.add(key)
+      removedKeys.add(elementKey(stroke))
+      if (stroke.id) persist.queueEraseId(stroke.id, stroke.page ?? currentPage.value)
+      else persist.markUnsavedStrokeDiscarded(stroke)
       continue
     }
 
     applyStrokeSegment(stroke, segments[0])
     nextStrokes.push(stroke)
-    if (stroke.id) pendingEraseUpdateKeys.add(key)
+    if (stroke.id) persist.queueEraseUpdate(elementKey(stroke))
+    // An unsaved stroke whose POST is in flight was sent with the
+    // untrimmed points — queue a transform resave for the trimmed shape.
+    else if (stroke.pending) void persist.saveElementTransform(stroke)
 
     for (let i = 1; i < segments.length; i++) {
       const splitStroke = createSplitStroke(stroke, segments[i])
       nextStrokes.push(splitStroke)
-      localUndoStack.value.push(splitStroke)
-      void saveStroke(splitStroke)
+      history.push(splitStroke)
+      void persist.saveStroke(splitStroke)
     }
   }
 
-  if (removedKeys.size === 0 && removedIds.length === 0 && pendingEraseUpdateKeys.size === 0) {
-    allStrokes.value = nextStrokes
-    return
-  }
+  if (!changed) return
   allStrokes.value = nextStrokes
-  localUndoStack.value = localUndoStack.value.filter(stroke => !removedKeys.has(elementKey(stroke)))
+  history.removeByKeys(removedKeys)
   if (selectedElementKeys.value.some(key => removedKeys.has(key))) clearSelection()
-  for (const id of removedIds) pendingEraseIds.add(id)
+  persist.persistPendingMirror()
 }
 
 function applyStrokeSegment(stroke: DrawingStroke, points: Point[]) {
@@ -1320,33 +1461,7 @@ function createSplitStroke(source: DrawingStroke, points: Point[]): CanvasStroke
   }
 }
 
-async function flushPendingEraseChanges() {
-  const updateKeys = Array.from(pendingEraseUpdateKeys)
-  pendingEraseUpdateKeys.clear()
-  const ids = Array.from(pendingEraseIds)
-  pendingEraseIds.clear()
-  if (updateKeys.length === 0 && ids.length === 0) return
-
-  try {
-    for (const key of updateKeys) {
-      const element = allStrokes.value.find(stroke => elementKey(stroke) === key)
-      if (element?.id) await saveElementTransform(element)
-    }
-
-    if (ids.length > 0) {
-      await api(`/api/projects/${props.boardSlug}/strokes/erase`, {
-        method: 'POST',
-        body: JSON.stringify({
-          ids,
-          page: currentPage.value,
-        }),
-      })
-    }
-  } catch {
-    saveError.value = '擦除失败'
-    void loadExistingStrokes()
-  }
-}
+// —— insert: text / mind map ——
 
 function chooseImage() {
   fileInputRef.value?.click()
@@ -1365,23 +1480,16 @@ function insertMindMap() {
   const height = Math.min(420, Math.max(300, viewportHeight * 0.5))
   const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
   const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
-  const mindmap = createLocalStroke(createMindMapTemplate(centerX - width / 2, centerY - height / 2, width, height), currentPage.value)
+  const mindmap = createLocalStroke(createDrawnixMindMapTemplate(centerX - width / 2, centerY - height / 2, width, height), currentPage.value)
 
   allStrokes.value.push(mindmap)
-  localUndoStack.value.push(mindmap)
+  history.push(mindmap)
   setTool('select')
   setSelectedElements([mindmap])
   selectedMindMapNodeId.value = 'root'
-  void saveStroke(mindmap)
-  saveError.value = '思维导图已添加'
-  window.setTimeout(() => {
-    if (saveError.value === '思维导图已添加') saveError.value = ''
-  }, 1600)
-  renderFrame()
-}
-
-function createMindMapTemplate(x: number, y: number, width: number, height: number): MindMapElementData {
-  return createDrawnixMindMapTemplate(x, y, width, height)
+  void persist.saveStroke(mindmap)
+  showTransientStatus('思维导图已添加')
+  notifyStrokesChanged()
 }
 
 function beginTextInsertion(point: Point) {
@@ -1399,7 +1507,7 @@ function beginTextInsertion(point: Point) {
     bold: false,
     italic: false,
   })
-  selectedElementKeys.value = []
+  clearSelection()
 }
 
 function beginTextEdit(element: TextStroke) {
@@ -1439,7 +1547,7 @@ function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.
     bold: node.id === 'root',
     italic: false,
   })
-  renderFrame()
+  requestRender()
 }
 
 function editSelectedMindMapNode() {
@@ -1459,8 +1567,8 @@ function addMindMapChild() {
   const node = addMindMapChildNode(element, parent.id)
   if (!node) return
   selectedMindMapNodeId.value = node.id
-  renderFrame()
-  void saveElementTransform(element)
+  notifyStrokesChanged()
+  void persist.saveElementTransform(element)
   beginMindMapEdit(element, node.id)
 }
 
@@ -1475,8 +1583,8 @@ function addMindMapSibling() {
   const sibling = addMindMapSiblingNode(element, node.id)
   if (!sibling) return
   selectedMindMapNodeId.value = sibling.id
-  renderFrame()
-  void saveElementTransform(element)
+  notifyStrokesChanged()
+  void persist.saveElementTransform(element)
   beginMindMapEdit(element, sibling.id)
 }
 
@@ -1485,8 +1593,8 @@ function deleteMindMapNode() {
   const node = selectedMindMapNode.value
   if (!element || !node || node.id === 'root') return
   selectedMindMapNodeId.value = deleteMindMapNodeById(element, node.id)
-  renderFrame()
-  void saveElementTransform(element)
+  notifyStrokesChanged()
+  void persist.saveElementTransform(element)
 }
 
 function toggleSelectedMindMapCollapse() {
@@ -1494,38 +1602,8 @@ function toggleSelectedMindMapCollapse() {
   const node = selectedMindMapNode.value
   if (!element || !node) return
   if (!toggleMindMapNodeCollapsed(element, node.id)) return
-  renderFrame()
-  void saveElementTransform(element)
-}
-
-function createMindMapNodeId(element: MindMapElementData) {
-  return createMindMapNodeIdFromTree(element)
-}
-
-function findMindMapParentId(element: MindMapElementData, nodeId: string) {
-  return findMindMapParentIdFromTree(element, nodeId)
-}
-
-function getMindMapChildren(element: MindMapElementData, nodeId: string) {
-  return getMindMapChildrenFromTree(element, nodeId)
-}
-
-function getMindMapDescendantIds(element: MindMapElementData, nodeId: string) {
-  return getMindMapDescendantIdsFromTree(element, nodeId)
-}
-
-function layoutMindMap(element: MindMapElementData) {
-  layoutMindMapTree(element)
-}
-
-function worldToMindMapLocal(point: Point, element: MindMapElementData): Point {
-  const geometry = getElementGeometry(element as CanvasStroke)
-  const local = worldToElementCenteredLocal(point, geometry)
-  return { x: local.x + geometry.width / 2, y: local.y + geometry.height / 2 }
-}
-
-function mindMapLocalToWorld(element: MindMapElementData, point: Point): Point {
-  return elementLocalToWorld(point, getElementGeometry(element as CanvasStroke))
+  notifyStrokesChanged()
+  void persist.saveElementTransform(element)
 }
 
 /**
@@ -1545,7 +1623,8 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
         node.height = Math.max(node.height, Math.min(90, commit.height))
         setSelectedElements([element])
         selectedMindMapNodeId.value = node.id
-        await saveElementTransform(element)
+        notifyStrokesChanged()
+        await persist.saveElementTransform(element)
       }
     }
     return
@@ -1566,7 +1645,8 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
       element.bold = commit.bold
       element.italic = commit.italic
       setSelectedElements([element])
-      await saveElementTransform(element)
+      notifyStrokesChanged()
+      await persist.saveElementTransform(element)
     }
     return
   }
@@ -1587,19 +1667,19 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
   }, currentPage.value)
 
   allStrokes.value.push(element)
-  localUndoStack.value.push(element)
+  history.push(element)
   currentTool.value = 'select'
-  selectedElementKeys.value = [elementKey(element)]
-  void saveStroke(element)
-  saveError.value = '文本已添加'
-  window.setTimeout(() => {
-    if (saveError.value === '文本已添加') saveError.value = ''
-  }, 1600)
+  setSelectedElements([element])
+  void persist.saveStroke(element)
+  showTransientStatus('文本已添加')
+  notifyStrokesChanged()
 }
 
 function measureInsertedText(text = '', fontSize = DEFAULT_TEXT_FONT_SIZE, width = DEFAULT_TEXT_WIDTH, bold = false, italic = false) {
   return measureTextBox(canvasRef.value?.getContext('2d'), text, fontSize, width, bold, italic)
 }
+
+// —— image / pdf upload ——
 
 function onImageFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -1666,7 +1746,7 @@ async function addImageFile(file: File) {
 
   saveError.value = '图片上传中'
   try {
-    const [size, asset] = await Promise.all([readImageSize(file), uploadImageAsset(file)])
+    const [size, asset] = await Promise.all([readImageSize(file), uploadAsset(file, 'image')])
     const canvas = canvasRef.value
     const rect = canvas?.getBoundingClientRect()
     const viewportWidth = (rect?.width || 800) / scale.value
@@ -1688,48 +1768,35 @@ async function addImageFile(file: File) {
     }, currentPage.value)
 
     allStrokes.value.push(image)
-    localUndoStack.value.push(image)
+    history.push(image)
     setTool('select')
-    selectedElementKeys.value = [elementKey(image)]
-    void saveStroke(image)
-    saveError.value = '图片已添加'
-    window.setTimeout(() => {
-      if (saveError.value === '图片已添加') saveError.value = ''
-    }, 1600)
-    renderFrame()
-  } catch {
-    saveError.value = '添加图片失败'
+    setSelectedElements([image])
+    void persist.saveStroke(image)
+    showTransientStatus('图片已添加')
+    notifyStrokesChanged()
+  } catch (err) {
+    saveError.value = `添加图片失败：${err instanceof Error && err.message ? err.message : '未知错误'}`
   }
 }
 
-async function uploadImageAsset(file: File): Promise<UploadedImageAsset> {
+/**
+ * Upload through the shared assets endpoint. The form field name tells the
+ * server which asset kind (size cap + allowed mime types) to apply.
+ */
+async function uploadAsset(file: File, field: 'image' | 'pdf'): Promise<UploadedImageAsset> {
   const form = new FormData()
-  form.append('image', file)
-  const res = await fetch(`/api/projects/${props.boardSlug}/assets`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: form,
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json()
-}
-
-async function uploadPdfAsset(file: File): Promise<UploadedImageAsset> {
-  // Same endpoint, different form key. Server inspects the field name
-  // to pick the asset kind (size cap and allowed mime types).
-  const form = new FormData()
-  form.append('pdf', file)
+  form.append(field, file)
   const res = await fetch(`/api/projects/${props.boardSlug}/assets`, {
     method: 'POST',
     credentials: 'same-origin',
     body: form,
   })
   if (!res.ok) {
-    let message = `${res.status}`
+    let message = `${res.status} ${res.statusText}`
     try {
       const data = await res.json() as { error?: string }
       if (data.error) message = data.error
-    } catch { /* ignore */ }
+    } catch { /* non-JSON error body; keep the status text */ }
     throw new Error(message)
   }
   return res.json()
@@ -1749,7 +1816,7 @@ async function addPdfFile(file: File) {
     const arrayBuffer = await file.arrayBuffer()
     const metadata = await probePdf(arrayBuffer.slice(0))
     saveError.value = 'PDF 上传中'
-    const asset = await uploadPdfAsset(file)
+    const asset = await uploadAsset(file, 'pdf')
 
     const PAGE_GAP = 24
     // Cap the inserted PDF so it fits within the current viewport on
@@ -1793,17 +1860,14 @@ async function addPdfFile(file: File) {
     }, currentPage.value)
 
     allStrokes.value.push(pdfElement)
-    localUndoStack.value.push(pdfElement)
+    history.push(pdfElement)
     setTool('select')
-    selectedElementKeys.value = [elementKey(pdfElement)]
-    void saveStroke(pdfElement)
-    saveError.value = `PDF 已添加 (${metadata.pageCount} 页)`
-    window.setTimeout(() => {
-      if (saveError.value.startsWith('PDF 已添加')) saveError.value = ''
-    }, 1800)
-    renderFrame()
+    setSelectedElements([pdfElement])
+    void persist.saveStroke(pdfElement)
+    showTransientStatus(`PDF 已添加 (${metadata.pageCount} 页)`, 1800)
+    notifyStrokesChanged()
   } catch (err) {
-    saveError.value = `添加 PDF 失败：${(err as Error).message || '未知错误'}`
+    saveError.value = `添加 PDF 失败：${err instanceof Error && err.message ? err.message : '未知错误'}`
   }
 }
 
@@ -1830,122 +1894,64 @@ async function readImageSize(file: File): Promise<{ width: number; height: numbe
   })
 }
 
-function getStrokeBounds(strokes: StrokeData[]) {
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const stroke of strokes) {
-    if (isRectElement(stroke)) {
-      for (const corner of getElementWorldCorners(stroke)) {
-        minX = Math.min(minX, corner.x)
-        minY = Math.min(minY, corner.y)
-        maxX = Math.max(maxX, corner.x)
-        maxY = Math.max(maxY, corner.y)
-      }
-    } else if (isDrawingStroke(stroke)) {
-      for (const point of stroke.points) {
-        minX = Math.min(minX, point.x)
-        minY = Math.min(minY, point.y)
-        maxX = Math.max(maxX, point.x)
-        maxY = Math.max(maxY, point.y)
-      }
-    }
+// —— pdf pager ——
+
+// Flip a PDF element to a new page. Single-page mode: each page may
+// have its own aspect ratio, but we preserve the user's existing
+// stretch by carrying the current vertical scale (element.height /
+// pageHeights[currentIdx]) across the flip. So a user who already
+// resized the PDF won't see it snap back to the page's natural size
+// — only the per-page aspect difference shows up.
+// Persisted via the same PATCH path as a regular transform so other
+// clients see the flip.
+function setPdfPage(element: CanvasStroke, nextIndex: number) {
+  if (element.type !== 'pdf') return
+  const target = Math.max(0, Math.min(element.pageCount - 1, Math.floor(nextIndex)))
+  const currentIdx = element.currentPageIndex ?? 0
+  if (target === currentIdx) return
+  const currentNominal = element.pageHeights[currentIdx]
+  const targetNominal = element.pageHeights[target]
+  element.currentPageIndex = target
+  if (Number.isFinite(currentNominal) && currentNominal > 0
+    && Number.isFinite(targetNominal) && targetNominal > 0) {
+    const verticalScale = element.height / currentNominal
+    element.height = targetNominal * verticalScale
   }
-  if (!Number.isFinite(minX)) {
-    minX = -200
-    minY = -120
-    maxX = 200
-    maxY = 120
-  }
-
-  const viewport = getViewportWorldBounds()
-  minX = Math.min(minX, viewport.minX)
-  minY = Math.min(minY, viewport.minY)
-  maxX = Math.max(maxX, viewport.maxX)
-  maxY = Math.max(maxY, viewport.maxY)
-
-  const padding = 80
-  return { minX: minX - padding, minY: minY - padding, maxX: maxX + padding, maxY: maxY + padding }
+  notifyStrokesChanged()
+  void persist.saveElementTransform(element)
 }
 
-function renderMiniMap() {
-  const mini = miniMapRef.value
-  if (!mini) return
-  const ctx = mini.getContext('2d')!
-  const w = mini.width
-  const h = mini.height
-  ctx.clearRect(0, 0, w, h)
-  ctx.fillStyle = 'rgba(255,255,255,0.9)'
-  ctx.fillRect(0, 0, w, h)
-
-  const bounds = getStrokeBounds(allStrokes.value)
-  const bw = Math.max(1, bounds.maxX - bounds.minX)
-  const bh = Math.max(1, bounds.maxY - bounds.minY)
-  const mapScale = Math.min((w - 16) / bw, (h - 16) / bh)
-  const ox = (w - bw * mapScale) / 2
-  const oy = (h - bh * mapScale) / 2
-
-  ctx.save()
-  ctx.translate(ox - bounds.minX * mapScale, oy - bounds.minY * mapScale)
-  ctx.scale(mapScale, mapScale)
-  drawStrokes(ctx, allStrokes.value, { imageCache, pdfCache, scheduleRender })
-  ctx.restore()
-
-  const view = getViewportWorldBounds()
-  ctx.strokeStyle = '#202124'
-  ctx.lineWidth = 1.5
-  ctx.strokeRect(
-    ox + (view.minX - bounds.minX) * mapScale,
-    oy + (view.minY - bounds.minY) * mapScale,
-    (view.maxX - view.minX) * mapScale,
-    (view.maxY - view.minY) * mapScale,
-  )
+function pdfPagerPrev() {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) - 1)
 }
 
-function onMiniMapPointer(e: PointerEvent) {
-  const mini = miniMapRef.value
-  const canvas = canvasRef.value
-  if (!mini || !canvas) return
-  const rect = mini.getBoundingClientRect()
-  const bounds = getStrokeBounds(allStrokes.value)
-  const bw = Math.max(1, bounds.maxX - bounds.minX)
-  const bh = Math.max(1, bounds.maxY - bounds.minY)
-  const mapScale = Math.min((mini.width - 16) / bw, (mini.height - 16) / bh)
-  const ox = (mini.width - bw * mapScale) / 2
-  const oy = (mini.height - bh * mapScale) / 2
-  const worldX = bounds.minX + ((e.clientX - rect.left) / rect.width * mini.width - ox) / mapScale
-  const worldY = bounds.minY + ((e.clientY - rect.top) / rect.height * mini.height - oy) / mapScale
-  centerOnWorldPoint({ x: worldX, y: worldY })
+function pdfPagerNext() {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) + 1)
 }
 
-function scheduleResizeCanvas() {
-  void nextTick(() => {
-    window.requestAnimationFrame(() => {
-      resizeCanvas()
-      window.setTimeout(resizeCanvas, 80)
-    })
-  })
+function pdfPagerInput(value: string) {
+  const pdf = selectedPdfElement.value
+  if (!pdf) return
+  // User-facing pager is 1-based; data model is 0-based.
+  const oneBased = Number.parseInt(value, 10)
+  if (!Number.isFinite(oneBased)) return
+  setPdfPage(pdf, oneBased - 1)
 }
 
-function resizeCanvas() {
-  const canvas = canvasRef.value
-  const wrap = wrapRef.value
-  if (!canvas || !wrap) return
-  const dpr = window.devicePixelRatio || 1
-  const rect = wrap.getBoundingClientRect()
-  const cssWidth = Math.max(1, Math.round(rect.width))
-  const cssHeight = Math.max(1, Math.round(rect.height))
-  const pixelWidth = Math.max(1, Math.floor(cssWidth * dpr))
-  const pixelHeight = Math.max(1, Math.floor(cssHeight * dpr))
-  if (canvas.width !== pixelWidth) canvas.width = pixelWidth
-  if (canvas.height !== pixelHeight) canvas.height = pixelHeight
-  canvas.style.width = cssWidth + 'px'
-  canvas.style.height = cssHeight + 'px'
-  renderFrame()
-}
+// —— keyboard ——
 
 function onKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (selection.cancelActiveInteraction()) {
+      e.preventDefault()
+      notifyStrokesChanged()
+      return
+    }
+  }
   if (handleMindMapKeyDown(e)) return
   if (e.code === 'Space') {
     e.preventDefault()
@@ -2005,7 +2011,7 @@ function handleMindMapKeyDown(e: KeyboardEvent) {
     if (nextId) {
       e.preventDefault()
       selectedMindMapNodeId.value = nextId
-      renderFrame()
+      requestRender()
       return true
     }
   }
@@ -2018,151 +2024,16 @@ function isEditableKeyboardTarget(target: EventTarget | null) {
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
-async function saveStroke(stroke: CanvasStroke) {
-  if (stroke.id || stroke.pending) return
-  stroke.pending = true
-  stroke.failed = false
-  saveError.value = ''
-
-  try {
-    const previousElementKey = elementKey(stroke)
-    const row = await api<StrokeRow>(`/api/projects/${props.boardSlug}/strokes`, {
-      method: 'POST',
-      body: JSON.stringify({
-        stroke_data: JSON.stringify(persistableStroke(stroke)),
-        local_id: stroke.localId,
-        page: stroke.page ?? currentPage.value,
-      }),
-    })
-    applySavedRow(stroke, row)
-    if (erasedPendingKeys.delete(previousElementKey)) {
-      pendingEraseIds.add(row.id)
-      void flushPendingEraseChanges()
-    }
-    selectedElementKeys.value = selectedElementKeys.value.map(key => key === previousElementKey ? elementKey(stroke) : key)
-    if (row.id > lastSyncedId.value) lastSyncedId.value = row.id
-  } catch {
-    stroke.failed = true
-    stroke.retryCount = (stroke.retryCount || 0) + 1
-    saveError.value = '保存失败'
-    scheduleStrokeRetry(stroke)
-  } finally {
-    stroke.pending = false
-    savePendingStrokes(props.boardSlug, allStrokes.value)
-    renderFrame()
-    if (stroke.id && !stroke.failed && selectedElementKeys.value.includes(elementKey(stroke))) void saveElementTransform(stroke)
-  }
-}
-
-// Flip a PDF element to a new page. Single-page mode: each page may
-// have its own aspect ratio, but we preserve the user's existing
-// stretch by carrying the current vertical scale (element.height /
-// pageHeights[currentIdx]) across the flip. So a user who already
-// resized the PDF won't see it snap back to the page's natural size
-// — only the per-page aspect difference shows up.
-// Persisted via the same PATCH path as a regular transform so other
-// clients see the flip.
-function setPdfPage(element: CanvasStroke, nextIndex: number) {
-  if (element.type !== 'pdf') return
-  const target = Math.max(0, Math.min(element.pageCount - 1, Math.floor(nextIndex)))
-  const currentIdx = element.currentPageIndex ?? 0
-  if (target === currentIdx) return
-  const currentNominal = element.pageHeights[currentIdx]
-  const targetNominal = element.pageHeights[target]
-  element.currentPageIndex = target
-  if (Number.isFinite(currentNominal) && currentNominal > 0
-    && Number.isFinite(targetNominal) && targetNominal > 0) {
-    const verticalScale = element.height / currentNominal
-    element.height = targetNominal * verticalScale
-  }
-  renderFrame()
-  void saveElementTransform(element)
-}
-
-function pdfPagerPrev() {
-  const pdf = selectedPdfElement.value
-  if (!pdf) return
-  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) - 1)
-}
-
-function pdfPagerNext() {
-  const pdf = selectedPdfElement.value
-  if (!pdf) return
-  setPdfPage(pdf, (pdf.currentPageIndex ?? 0) + 1)
-}
-
-function pdfPagerInput(value: string) {
-  const pdf = selectedPdfElement.value
-  if (!pdf) return
-  // User-facing pager is 1-based; data model is 0-based.
-  const oneBased = Number.parseInt(value, 10)
-  if (!Number.isFinite(oneBased)) return
-  setPdfPage(pdf, oneBased - 1)
-}
-
-async function saveElementTransform(element: CanvasStroke) {
-  if (!element.id || element.pending) {
-    savePendingStrokes(props.boardSlug, allStrokes.value)
-    renderFrame()
-    return
-  }
-
-  element.pending = true
-  saveError.value = ''
-  try {
-    const row = await api<StrokeRow>(`/api/projects/${props.boardSlug}/strokes/${element.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        stroke_data: JSON.stringify(persistableStroke(element)),
-        page: element.page ?? currentPage.value,
-      }),
-    })
-    const parsed = parseStrokeRow(row)
-    if (parsed) {
-      const localId = element.localId
-      Object.assign(element, parsed, { localId })
-    }
-  } catch {
-    saveError.value = '元素更新失败'
-  } finally {
-    element.pending = false
-    renderFrame()
-  }
-}
-
-function scheduleStrokeRetry(stroke: CanvasStroke) {
-  if (stroke.id || stroke.retryTimer) return
-  const retryCount = stroke.retryCount || 1
-  const delay = Math.min(30000, 1200 * 2 ** Math.min(retryCount - 1, 5))
-  stroke.retryTimer = window.setTimeout(() => {
-    stroke.retryTimer = undefined
-    void saveStroke(stroke)
-  }, delay)
-}
-
-async function retryFailedSaves() {
-  if (retryTimer.value) return
-  const failed = allStrokes.value.filter(stroke => stroke.failed && !stroke.id)
-  for (const stroke of failed) {
-    if (stroke.retryTimer) {
-      window.clearTimeout(stroke.retryTimer)
-      stroke.retryTimer = undefined
-    }
-    await saveStroke(stroke)
-  }
-  retryTimer.value = window.setTimeout(() => {
-    retryTimer.value = null
-  }, 600)
-}
+// —— commands: undo / clear / retry ——
 
 async function undoLastStroke() {
-  const target = localUndoStack.value.pop()
+  const target = history.pop()
   if (!target) return
   if (!target.id) {
     allStrokes.value = allStrokes.value.filter(stroke => stroke !== target)
-    if (target.retryTimer) window.clearTimeout(target.retryTimer)
-    selectedElementKeys.value = selectedElementKeys.value.filter(key => key !== elementKey(target))
-    renderFrame()
+    persist.markUnsavedStrokeDiscarded(target)
+    selection.dropKey(elementKey(target))
+    notifyStrokesChanged()
     return
   }
 
@@ -2171,11 +2042,17 @@ async function undoLastStroke() {
       method: 'DELETE',
     })
     allStrokes.value = allStrokes.value.filter(stroke => stroke.id !== target.id)
-    selectedElementKeys.value = selectedElementKeys.value.filter(key => key !== elementKey(target))
-    renderFrame()
+    selection.dropKey(elementKey(target))
+    notifyStrokesChanged()
   } catch {
+    // Deletion failed: keep the entry undoable instead of dropping it.
+    history.push(target)
     saveError.value = '撤销失败'
   }
+}
+
+function retryFailedSaves() {
+  void persist.retryFailedSaves()
 }
 
 async function clearBoard() {
@@ -2184,55 +2061,46 @@ async function clearBoard() {
   try {
     await api(`/api/projects/${props.boardSlug}/strokes?page=${currentPage.value}`, { method: 'DELETE' })
     allStrokes.value = allStrokes.value.filter(stroke => (stroke.pending || stroke.failed) && (stroke.page ?? currentPage.value) === currentPage.value)
-    localUndoStack.value = []
+    history.clear()
     clearSelection()
     saveError.value = ''
-    renderFrame()
+    notifyStrokesChanged()
   } catch {
     saveError.value = '清空失败'
   }
 }
 
-async function loadExistingStrokes(incremental = false) {
-  const page = currentPage.value
-  const since = incremental ? lastSyncedId.value : 0
-  try {
-    const url = `/api/projects/${props.boardSlug}/strokes?page=${page}${since > 0 ? `&since=${since}` : ''}`
-    const rows = await api<StrokeRow[]>(url)
-    if (page !== currentPage.value) return
-    const parsed = rows.map(parseStrokeRow).filter((stroke): stroke is CanvasStroke => !!stroke).map(prepareStrokeForBoard)
-
-    if (incremental) {
-      const knownIds = new Set(allStrokes.value.map(stroke => stroke.id).filter((v): v is number => !!v))
-      for (const stroke of parsed) {
-        if (stroke.id && !knownIds.has(stroke.id)) allStrokes.value.push(stroke)
-      }
-    } else {
-      const unsaved = allStrokes.value.filter(stroke => !stroke.id && (stroke.pending || stroke.failed) && (stroke.page ?? page) === page)
-      allStrokes.value = [...parsed, ...unsaved]
-    }
-
-    const maxId = parsed.reduce((m, s) => (s.id && s.id > m ? s.id : m), lastSyncedId.value)
-    lastSyncedId.value = maxId
-    renderFrame()
-  } catch {
-    saveError.value = '加载失败'
-  }
-}
+// —— pages / share / export ——
 
 async function goToPage(page: number) {
   const nextPage = Math.max(0, Math.min(9999, page))
   if (nextPage === currentPage.value) return
+  // Push out anything queued for the page we're leaving, and mirror its
+  // unsaved strokes before they're dropped from memory.
+  void persist.flushPendingEraseChanges()
+  persist.persistPendingMirror()
   currentPage.value = nextPage
   updatePageUrl()
   currentStroke.value = null
   isDrawing.value = false
   isPanning.value = false
   clearSelection()
-  localUndoStack.value = []
+  history.clear()
   lastSyncedId.value = 0
   resetView()
-  await loadExistingStrokes()
+  await sync.loadExistingStrokes()
+  restorePendingForPage(nextPage)
+}
+
+/** Re-attach unsaved strokes mirrored in localStorage for this page. */
+function restorePendingForPage(page: number) {
+  const knownLocalIds = new Set(allStrokes.value.map(stroke => stroke.localId).filter(Boolean))
+  const restored = loadPendingStrokes(props.boardSlug, page)
+    .filter(stroke => !stroke.localId || !knownLocalIds.has(stroke.localId))
+    .map(prepareStrokeForBoard)
+  if (restored.length === 0) return
+  allStrokes.value.push(...restored)
+  notifyStrokesChanged()
 }
 
 function updatePageUrl() {
@@ -2253,10 +2121,7 @@ async function copyShareLink() {
   else url.searchParams.set('page', String(currentPage.value))
   try {
     await navigator.clipboard.writeText(url.toString())
-    saveError.value = '链接已复制'
-    window.setTimeout(() => {
-      if (saveError.value === '链接已复制') saveError.value = ''
-    }, 1600)
+    showTransientStatus('链接已复制')
   } catch {
     saveError.value = '复制失败'
   }
@@ -2279,82 +2144,7 @@ function exportPng() {
   }, 'image/png')
 }
 
-function handleSocketMessage(event: MessageEvent) {
-  let message: WhiteboardWsMessage
-  try {
-    message = JSON.parse(String(event.data))
-  } catch {
-    return
-  }
-
-  if (message.type === 'stroke-created') {
-    if ((message.page ?? message.stroke.page ?? 0) !== currentPage.value) return
-    const parsed = parseStrokeRow(message.stroke)
-    if (!parsed) return
-    prepareStrokeForBoard(parsed)
-
-    if (parsed.id && parsed.id > lastSyncedId.value) lastSyncedId.value = parsed.id
-
-    if (message.local_id) {
-      const local = allStrokes.value.find(stroke => stroke.localId === message.local_id)
-      if (local) {
-        applySavedRow(local, message.stroke)
-        savePendingStrokes(props.boardSlug, allStrokes.value)
-        renderFrame()
-        return
-      }
-    }
-
-    if (allStrokes.value.some(stroke => stroke.id === parsed.id)) return
-    allStrokes.value.push(parsed)
-    renderFrame()
-    return
-  }
-
-  if (message.type === 'strokes-cleared') {
-    if ((message.page ?? 0) !== currentPage.value) return
-    allStrokes.value = allStrokes.value.filter(stroke => stroke.pending || stroke.failed)
-    localUndoStack.value = []
-    clearSelection()
-    renderFrame()
-    return
-  }
-
-  if (message.type === 'stroke-updated') {
-    if ((message.page ?? message.stroke.page ?? 0) !== currentPage.value) return
-    const parsed = parseStrokeRow(message.stroke)
-    if (!parsed) return
-    prepareStrokeForBoard(parsed)
-    const existing = allStrokes.value.find(stroke => stroke.id === parsed.id)
-    if (existing) {
-      const localId = existing.localId
-      Object.assign(existing, parsed, { localId })
-    } else {
-      allStrokes.value.push(parsed)
-    }
-    renderFrame()
-    return
-  }
-
-  if (message.type === 'stroke-deleted') {
-    if ((message.page ?? 0) !== currentPage.value) return
-    allStrokes.value = allStrokes.value.filter(stroke => stroke.id !== message.id)
-    localUndoStack.value = localUndoStack.value.filter(stroke => stroke.id !== message.id)
-    selectedElementKeys.value = selectedElementKeys.value.filter(key => key !== `id:${message.id}`)
-    renderFrame()
-  }
-}
-
-async function flushPendingStrokes() {
-  const pending = allStrokes.value.filter(stroke => !stroke.id && stroke.failed)
-  for (const stroke of pending) {
-    if (stroke.retryTimer) {
-      window.clearTimeout(stroke.retryTimer)
-      stroke.retryTimer = undefined
-    }
-    await saveStroke(stroke)
-  }
-}
+// —— lifecycle ——
 
 onMounted(async () => {
   await nextTick()
@@ -2371,27 +2161,20 @@ onMounted(async () => {
   window.addEventListener('paste', onPaste)
   await authStore.check()
 
-  const restored = loadPendingStrokes(props.boardSlug).filter(stroke => (stroke.page ?? 0) === currentPage.value).map(prepareStrokeForBoard)
-  if (restored.length) allStrokes.value.push(...restored)
-
-  await loadExistingStrokes()
+  restorePendingForPage(currentPage.value)
+  await sync.loadExistingStrokes()
   connectSocket()
 })
 
 onBeforeUnmount(() => {
-  unmounted = true
   resizeObserver?.disconnect()
   resizeObserver = null
   window.removeEventListener('resize', resizeCanvas)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('paste', onPaste)
-  if (retryTimer.value) window.clearTimeout(retryTimer.value)
+  if (statusTimer !== null) window.clearTimeout(statusTimer)
+  if (miniMapTimer !== null) window.clearTimeout(miniMapTimer)
   if (frameRequest !== null) window.cancelAnimationFrame(frameRequest)
-  for (const stroke of allStrokes.value) {
-    if (stroke.retryTimer) {
-      window.clearTimeout(stroke.retryTimer)
-    }
-  }
 })
 </script>

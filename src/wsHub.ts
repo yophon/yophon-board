@@ -1,3 +1,5 @@
+import type { BoardWsMessage } from "../shared/types";
+
 export type BoardWsData = { boardSlug: string };
 
 export class BoardHub {
@@ -14,7 +16,7 @@ export class BoardHub {
     if (clients.size === 0) this.clients.delete(boardSlug);
   }
 
-  broadcast(boardSlug: string, message: Record<string, unknown>): void {
+  broadcast(boardSlug: string, message: BoardWsMessage): void {
     const payload = JSON.stringify(message);
     const clients = this.clients.get(boardSlug);
     if (!clients) return;

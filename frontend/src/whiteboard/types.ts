@@ -117,29 +117,16 @@ export type CanvasStroke = StrokeData & {
   failed?: boolean
   retryCount?: number
   retryTimer?: number
+  /** Retry timer for failed PATCH (transform) saves; creation retries use `retryTimer`. */
+  transformRetryTimer?: number
 }
 
-export interface UploadedImageAsset {
-  asset_id: string
-  url: string
-  mime: string
-  size: number
-  /** New backend tags assets by kind; older clients can default to "image". */
-  kind?: 'image' | 'pdf'
-}
-
-export interface StrokeRow {
-  id: number
-  stroke_data: string
-  created_at: number
-  page?: number
-}
+// Wire-format types live in shared/types.ts so the backend and frontend
+// cannot drift apart; re-exported here under their historical names.
+export type {
+  PublicStrokeRow as StrokeRow,
+  UploadedAsset as UploadedImageAsset,
+  BoardWsMessage as WhiteboardWsMessage,
+} from '../../../shared/types'
 
 export type WsState = 'offline' | 'connecting' | 'online'
-
-export type WhiteboardWsMessage =
-  | { type: 'connected' }
-  | { type: 'stroke-created'; stroke: StrokeRow; local_id?: string; page?: number }
-  | { type: 'stroke-updated'; stroke: StrokeRow; page?: number }
-  | { type: 'stroke-deleted'; id: number; page?: number }
-  | { type: 'strokes-cleared'; page?: number }

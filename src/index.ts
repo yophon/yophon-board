@@ -1,50 +1,21 @@
-import { Elysia, t } from "elysia";
+import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
-import { saveAsset, serveAsset } from "./assets";
 import {
   INTERNAL_REMOTE_IP_HEADER,
   LOGIN_RATE_LIMIT_MAX,
   LOGIN_RATE_LIMIT_WINDOW_MS,
   PUBLIC_WRITE_LIMIT_MAX,
   PUBLIC_WRITE_LIMIT_WINDOW_MS,
-  SESSION_COOKIE,
   serverConfig,
 } from "./config";
-import {
-  clearBoardPage,
-  createAdminSession,
-  createStroke,
-  deleteAdminSession,
-  deleteOwnStroke,
-  deleteStrokes,
-  ensureBoard,
-  getBoard,
-  getDbStats,
-  getStrokes,
-  initDb,
-  listBoards,
-  normalizeSlug,
-  updateStroke,
-  updateAdminPassword,
-  validateAdminSession,
-  verifyAdminPassword,
-} from "./db";
-import {
-  badRequest,
-  ensureClientId,
-  getClientKey,
-  parseId,
-  parsePage,
-  shouldUseSecureCookie,
-  toPublicBoard,
-  toPublicStroke,
-  tooManyRequests,
-  type CookieJar,
-} from "./http";
+import { ensureBoard, initDb, normalizeSlug } from "./db";
+import { AppError } from "./errors";
 import { logRequest } from "./log";
 import { SlidingWindowRateLimiter } from "./rateLimit";
+import { createAssetRoutes } from "./routes/assets";
+import { createAuthRoutes } from "./routes/auth";
+import { createProjectRoutes } from "./routes/projects";
 import { serveIndex, serveStaticAsset } from "./staticFiles";
-import { normalizeStrokeData } from "./stroke";
 import { BoardHub, type BoardWsData } from "./wsHub";
 
 const db = initDb();
@@ -52,159 +23,7 @@ const boardHub = new BoardHub();
 const writeLimiter = new SlidingWindowRateLimiter(PUBLIC_WRITE_LIMIT_MAX, PUBLIC_WRITE_LIMIT_WINDOW_MS);
 const loginLimiter = new SlidingWindowRateLimiter(LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW_MS);
 
-function isAuthed(cookie: CookieJar): boolean {
-  const sid = cookie[SESSION_COOKIE]?.value;
-  return typeof sid === "string" && sid.length > 0 && validateAdminSession(db, sid);
-}
-
-function listProjects() {
-  return listBoards(db).map(toPublicBoard);
-}
-
-function getOrCreateProject(slug: string) {
-  return toPublicBoard(ensureBoard(db, slug));
-}
-
-function createProject(payload: { slug: string; title?: string }) {
-  return toPublicBoard(ensureBoard(db, payload.slug, payload.title));
-}
-
-function listProjectStrokes(slug: string, query: Record<string, unknown>) {
-  const board = getBoard(db, slug);
-  if (!board) return [];
-  const sinceRaw = Number(query.since ?? 0);
-  const sinceId = Number.isInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
-  return getStrokes(db, board.id, parsePage(query.page), sinceId).map(toPublicStroke);
-}
-
-function saveProjectStroke(slug: string, body: unknown, request: Request, cookie: CookieJar) {
-  const clientKey = getClientKey(request);
-  if (writeLimiter.hit(`stroke:${clientKey}`)) {
-    return tooManyRequests("提交过于频繁，请稍后再试");
-  }
-
-  const payload = body as { stroke_data: string; local_id: string; page?: number };
-  const localId = payload.local_id?.trim();
-  if (!localId || localId.length > 120) {
-    return badRequest("缺少客户端笔画标识");
-  }
-  const clientId = ensureClientId(cookie, request);
-
-  const page = parsePage(payload.page);
-  const normalized = normalizeStrokeData(payload.stroke_data);
-  if (!normalized.ok) return badRequest(normalized.message);
-
-  const board = ensureBoard(db, slug);
-  const row = createStroke(db, board.id, page, clientId, localId, normalized.value);
-  const publicRow = toPublicStroke(row);
-  boardHub.broadcast(board.slug, { type: "stroke-created", stroke: publicRow, local_id: localId, page });
-  return publicRow;
-}
-
-async function uploadProjectAsset(slug: string, request: Request) {
-  const clientKey = getClientKey(request);
-  if (writeLimiter.hit(`asset:${clientKey}`)) {
-    return tooManyRequests("提交过于频繁，请稍后再试");
-  }
-
-  const form = await request.formData();
-  // Accept the legacy `image` key plus the generic `pdf` key. The form
-  // field name selects the asset kind; the file's mime type is
-  // re-validated against that kind in saveAsset.
-  const imageField = form.get("image");
-  const pdfField = form.get("pdf");
-  const file = pdfField instanceof File ? pdfField : imageField instanceof File ? imageField : null;
-  if (!file) return badRequest("缺少上传文件");
-  const kind: "pdf" | "image" = pdfField instanceof File ? "pdf" : "image";
-
-  const board = ensureBoard(db, slug);
-  try {
-    return await saveAsset(board.slug, file, kind);
-  } catch (error) {
-    const msg = (error as Error).message;
-    if (msg === "INVALID_ASSET_TYPE") {
-      return badRequest(kind === "pdf" ? "仅支持 PDF 文件" : "仅支持 PNG、JPEG、WebP、GIF 图片");
-    }
-    if (msg === "ASSET_TOO_LARGE") {
-      return badRequest(kind === "pdf" ? "PDF 不能超过 10MB" : "图片不能超过 5MB");
-    }
-    throw error;
-  }
-}
-
-function getProjectAsset(slug: string, assetId: string) {
-  const board = getBoard(db, slug);
-  if (!board) return new Response(JSON.stringify({ error: "白板不存在" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
-  return serveAsset(board.slug, assetId);
-}
-
-function deleteOwnProjectStroke(slug: string, strokeId: string, query: Record<string, unknown>, request: Request, cookie: CookieJar) {
-  const board = getBoard(db, slug);
-  if (!board) return badRequest("白板不存在");
-  const page = parsePage(query.page);
-  const clientId = ensureClientId(cookie, request);
-
-  const id = parseId(strokeId);
-  const deleted = deleteOwnStroke(db, board.id, id, page, clientId);
-  if (!deleted) return badRequest("无法撤销此笔画");
-  boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
-  return { ok: true };
-}
-
-function eraseProjectStrokes(slug: string, body: unknown, request: Request) {
-  const clientKey = getClientKey(request);
-  if (writeLimiter.hit(`erase:${clientKey}`)) {
-    return tooManyRequests("提交过于频繁，请稍后再试");
-  }
-
-  const board = getBoard(db, slug);
-  if (!board) return badRequest("白板不存在");
-  const page = parsePage((body as { page?: number }).page);
-  const ids = Array.from(new Set(((body as { ids?: unknown[] }).ids || [])
-    .map(id => Number(id))
-    .filter(id => Number.isInteger(id) && id > 0)
-    .slice(0, 100)));
-  if (ids.length === 0) return { ok: true, deleted_ids: [] };
-
-  const deleted = deleteStrokes(db, board.id, page, ids);
-  for (const id of deleted) {
-    boardHub.broadcast(board.slug, { type: "stroke-deleted", id, page });
-  }
-  return { ok: true, deleted_ids: deleted };
-}
-
-function updateProjectStroke(slug: string, strokeId: string, body: unknown, query: Record<string, unknown>, request: Request) {
-  const clientKey = getClientKey(request);
-  if (writeLimiter.hit(`update:${clientKey}`)) {
-    return tooManyRequests("提交过于频繁，请稍后再试");
-  }
-
-  const board = getBoard(db, slug);
-  if (!board) return badRequest("白板不存在");
-  const id = parseId(strokeId);
-  const page = parsePage((body as { page?: number }).page ?? query.page);
-  const normalized = normalizeStrokeData((body as { stroke_data?: string }).stroke_data || "");
-  if (!normalized.ok) return badRequest(normalized.message);
-
-  const row = updateStroke(db, board.id, id, page, normalized.value);
-  if (!row) return badRequest("无法更新此元素");
-  const publicRow = toPublicStroke(row);
-  boardHub.broadcast(board.slug, { type: "stroke-updated", stroke: publicRow, page });
-  return publicRow;
-}
-
-function clearProjectPage(slug: string, query: Record<string, unknown>) {
-  const board = getBoard(db, slug);
-  if (!board) return badRequest("白板不存在");
-  const page = parsePage(query.page);
-  clearBoardPage(db, board.id, page);
-  boardHub.broadcast(board.slug, { type: "strokes-cleared", page });
-  return { ok: true };
-}
-
+// Periodically prune rate-limit maps so memory doesn't drift unbounded.
 setInterval(() => {
   writeLimiter.cleanup();
   loginLimiter.cleanup();
@@ -213,13 +32,9 @@ setInterval(() => {
 const app = new Elysia()
   .onError(({ code, error, set }) => {
     if (error instanceof Response) return error;
-    if ((error as Error).message === "INVALID_ID") {
-      set.status = 400;
-      return { error: "无效的 ID" };
-    }
-    if ((error as Error).message === "INVALID_SLUG") {
-      set.status = 400;
-      return { error: "无效的白板标识" };
+    if (error instanceof AppError) {
+      set.status = error.status;
+      return { error: error.userMessage };
     }
     if (code === "VALIDATION") {
       set.status = 400;
@@ -234,196 +49,21 @@ const app = new Elysia()
     credentials: true,
   }))
   .get("/api/health", () => ({ ok: true }))
-  .get("/api/projects", () => listProjects())
-  .get("/api/projects/:slug", ({ params }) => getOrCreateProject(params.slug))
-  .get("/api/projects/:slug/assets/:assetId", ({ params }) => getProjectAsset(params.slug, params.assetId))
-  .post("/api/projects/:slug/assets", ({ params, request }) => uploadProjectAsset(params.slug, request))
-  .get("/api/projects/:slug/strokes", ({ params, query }) => listProjectStrokes(params.slug, query))
-  .post("/api/projects/:slug/strokes", ({ params, body, request, cookie }) => {
-    return saveProjectStroke(params.slug, body, request, cookie);
-  }, {
-    body: t.Object({
-      stroke_data: t.String(),
-      local_id: t.String(),
-      client_id: t.Optional(t.String()),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .post("/api/projects/:slug/strokes/erase", ({ params, body, request }) => {
-    return eraseProjectStrokes(params.slug, body, request);
-  }, {
-    body: t.Object({
-      ids: t.Array(t.Number()),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .delete("/api/projects/:slug/strokes/:id", ({ params, query, request, cookie }) => {
-    return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
-  })
-  .patch("/api/projects/:slug/strokes/:id", ({ params, body, query, request }) => {
-    return updateProjectStroke(params.slug, params.id, body, query, request);
-  }, {
-    body: t.Object({
-      stroke_data: t.String(),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .delete("/api/projects/:slug/strokes", ({ params, query, cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    return clearProjectPage(params.slug, query);
-  })
-  .post("/api/projects", ({ body, cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    const payload = body as { slug: string; title?: string };
-    if (getBoard(db, payload.slug)) return badRequest("项目标识已存在");
-    return createProject(payload);
-  }, {
-    body: t.Object({
-      slug: t.String(),
-      title: t.Optional(t.String()),
-    }),
-  })
-  .get("/api/boards", () => listProjects())
-  .get("/api/boards/:slug", ({ params }) => {
-    return getOrCreateProject(params.slug);
-  })
-  .get("/api/boards/:slug/assets/:assetId", ({ params }) => getProjectAsset(params.slug, params.assetId))
-  .post("/api/boards/:slug/assets", ({ params, request }) => uploadProjectAsset(params.slug, request))
-  .post("/api/boards", ({ body, cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    return createProject(body as { slug: string; title?: string });
-  }, {
-    body: t.Object({
-      slug: t.String(),
-      title: t.Optional(t.String()),
-    }),
-  })
-  .post("/api/auth/login", async ({ body, cookie, set, request }) => {
-    const clientKey = getClientKey(request);
-    if (loginLimiter.hit(`login:${clientKey}`)) {
-      return tooManyRequests("登录尝试过于频繁，请稍后再试");
-    }
-
-    const ok = await verifyAdminPassword(db, (body as { password: string }).password);
-    if (!ok) {
-      set.status = 401;
-      return { error: "密码错误" };
-    }
-
-    const sid = createAdminSession(db);
-    cookie[SESSION_COOKIE].set({
-      value: sid,
-      httpOnly: true,
-      sameSite: "lax",
-      secure: shouldUseSecureCookie(request),
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60,
-    });
-    return { ok: true };
-  }, {
-    body: t.Object({ password: t.String() }),
-  })
-  .post("/api/auth/logout", ({ cookie, request }) => {
-    const sid = cookie[SESSION_COOKIE]?.value;
-    if (typeof sid === "string" && sid.length > 0) deleteAdminSession(db, sid);
-    cookie[SESSION_COOKIE].set({
-      value: "",
-      httpOnly: true,
-      sameSite: "lax",
-      secure: shouldUseSecureCookie(request),
-      maxAge: 0,
-      path: "/",
-    });
-    return { ok: true };
-  })
-  .get("/api/auth/check", ({ cookie }) => ({ authed: isAuthed(cookie) }))
-  .post("/api/auth/password", async ({ body, cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    const payload = body as { old_password: string; new_password: string };
-    if (!payload.new_password || payload.new_password.length < 8 || payload.new_password.length > 256) {
-      set.status = 400;
-      return { error: "新密码长度需在 8-256 之间" };
-    }
-    const ok = await updateAdminPassword(db, payload.old_password, payload.new_password);
-    if (!ok) {
-      set.status = 400;
-      return { error: "旧密码错误" };
-    }
-    cookie[SESSION_COOKIE].set({ value: "", maxAge: 0, path: "/" });
-    return { ok: true };
-  }, {
-    body: t.Object({
-      old_password: t.String(),
-      new_password: t.String(),
-    }),
-  })
-  .get("/api/admin/stats", ({ cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    const dbStats = getDbStats(db);
-    const { wsClients, wsBoards } = boardHub.stats();
-    return {
-      ...dbStats,
-      ws_clients: wsClients,
-      ws_boards: wsBoards,
-      write_attempts_keys: writeLimiter.size,
-      login_attempts_keys: loginLimiter.size,
-      uptime_seconds: Math.floor(process.uptime()),
-    };
-  })
-  .get("/api/boards/:slug/strokes", ({ params, query }) => {
-    return listProjectStrokes(params.slug, query);
-  })
-  .post("/api/boards/:slug/strokes", ({ params, body, request, cookie }) => {
-    return saveProjectStroke(params.slug, body, request, cookie);
-  }, {
-    body: t.Object({
-      stroke_data: t.String(),
-      local_id: t.String(),
-      client_id: t.Optional(t.String()),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .post("/api/boards/:slug/strokes/erase", ({ params, body, request }) => {
-    return eraseProjectStrokes(params.slug, body, request);
-  }, {
-    body: t.Object({
-      ids: t.Array(t.Number()),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .delete("/api/boards/:slug/strokes/:id", ({ params, query, request, cookie }) => {
-    return deleteOwnProjectStroke(params.slug, params.id, query, request, cookie);
-  })
-  .patch("/api/boards/:slug/strokes/:id", ({ params, body, query, request }) => {
-    return updateProjectStroke(params.slug, params.id, body, query, request);
-  }, {
-    body: t.Object({
-      stroke_data: t.String(),
-      page: t.Optional(t.Number()),
-    }),
-  })
-  .delete("/api/boards/:slug/strokes", ({ params, query, cookie, set }) => {
-    if (!isAuthed(cookie)) {
-      set.status = 401;
-      return { error: "未授权，请先登录" };
-    }
-    return clearProjectPage(params.slug, query);
-  });
+  .use(createProjectRoutes({ db, hub: boardHub, writeLimiter }))
+  .use(createAssetRoutes({ db, writeLimiter }))
+  .use(createAuthRoutes({
+    db,
+    loginLimiter,
+    runtimeStats: () => {
+      const { wsClients, wsBoards } = boardHub.stats();
+      return {
+        ws_clients: wsClients,
+        ws_boards: wsBoards,
+        write_attempts_keys: writeLimiter.size,
+        login_attempts_keys: loginLimiter.size,
+      };
+    },
+  }));
 
 Bun.serve<BoardWsData>({
   hostname: serverConfig.host,
@@ -461,7 +101,7 @@ Bun.serve<BoardWsData>({
       ws.send(JSON.stringify({ type: "connected", board: ws.data.boardSlug }));
     },
     message() {
-      // Writes use HTTP; WebSocket is only for fan-out.
+      // 客户端发来的 WebSocket 消息被刻意忽略：写操作全部走 HTTP，WS 仅做单向广播。
     },
     close(ws) {
       boardHub.remove(ws.data.boardSlug, ws);
