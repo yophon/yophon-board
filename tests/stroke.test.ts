@@ -205,4 +205,43 @@ describe("normalizeStrokeData: mindmap elements", () => {
   test("rejects edges pointing at unknown nodes", () => {
     expectFail(JSON.stringify({ ...validMindmap, edges: [{ from: "a", to: "nope" }] }), "思维导图连线不合法");
   });
+
+  test("passes nodeScale through and rounds it", () => {
+    const value = expectOk(JSON.stringify({ ...validMindmap, nodeScale: 1.23456 }));
+    expect(value.nodeScale).toBe(1.235);
+  });
+
+  test("omits nodeScale when absent (legacy rows)", () => {
+    const value = expectOk(JSON.stringify(validMindmap));
+    expect(value.nodeScale).toBeUndefined();
+  });
+
+  test("rejects out-of-range nodeScale", () => {
+    expectFail(JSON.stringify({ ...validMindmap, nodeScale: 0.1 }), "思维导图缩放不合法");
+    expectFail(JSON.stringify({ ...validMindmap, nodeScale: 9 }), "思维导图缩放不合法");
+    expectFail(JSON.stringify({ ...validMindmap, nodeScale: "big" }), "思维导图缩放不合法");
+  });
+
+  test("accepts scaled-up dimensions and fonts within the new caps", () => {
+    const value = expectOk(JSON.stringify({
+      ...validMindmap,
+      width: 6000,
+      height: 5000,
+      fontSize: 100,
+      nodeScale: 3,
+    }));
+    expect(value.width).toBe(6000);
+    expect(value.fontSize).toBe(100);
+  });
+
+  test("keeps multi-line node text up to 300 chars", () => {
+    const text = `第一行\n第二行\n${"长".repeat(400)}`;
+    const value = expectOk(JSON.stringify({
+      ...validMindmap,
+      nodes: [{ id: "a", text, x: 10, y: 10, width: 120, height: 40 }],
+      edges: [],
+    }));
+    expect(value.nodes[0].text.length).toBe(300);
+    expect(value.nodes[0].text).toContain("\n");
+  });
 });

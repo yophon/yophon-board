@@ -190,11 +190,12 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       !Number.isFinite(height) ||
       !Number.isFinite(fontSize) ||
       width < 160 ||
-      height < 120 ||
-      width > 4096 ||
-      height > 4096 ||
-      fontSize < 10 ||
-      fontSize > 72 ||
+      height < 110 ||
+      // Caps allow nodeScale up to 3× on a wide map.
+      width > 8192 ||
+      height > 8192 ||
+      fontSize < 8 ||
+      fontSize > 120 ||
       !Array.isArray(stroke.nodes) ||
       stroke.nodes.length < 1 ||
       stroke.nodes.length > 80 ||
@@ -204,11 +205,22 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       return { ok: false, message: "思维导图尺寸不合法" };
     }
 
+    // Uniform layout scale written by element resize; optional for rows
+    // saved before it existed.
+    let nodeScale: number | undefined;
+    if (stroke.nodeScale !== undefined && stroke.nodeScale !== null) {
+      const rawScale = Number(stroke.nodeScale);
+      if (!Number.isFinite(rawScale) || rawScale < 0.5 || rawScale > 3) {
+        return { ok: false, message: "思维导图缩放不合法" };
+      }
+      nodeScale = Math.round(rawScale * 1000) / 1000;
+    }
+
     const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string; branch?: "left" | "right"; collapsed?: boolean; manualPosition?: boolean }> = [];
     const nodeIds = new Set<string>();
     for (const rawNode of stroke.nodes) {
       const id = typeof rawNode?.id === "string" ? rawNode.id.trim().slice(0, 40) : "";
-      const text = typeof rawNode?.text === "string" ? rawNode.text.trim().slice(0, 120) : "";
+      const text = typeof rawNode?.text === "string" ? rawNode.text.trim().slice(0, 300) : "";
       const nodeX = Number(rawNode?.x);
       const nodeY = Number(rawNode?.y);
       const nodeWidth = Number(rawNode?.width);
@@ -265,6 +277,7 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       height: Math.round(height * 100) / 100,
       rotation: normalizeRotation(stroke.rotation),
       fontSize: Math.round(fontSize * 10) / 10,
+      nodeScale,
       layout: stroke.layout === "mind" ? "mind" : undefined,
       theme: stroke.theme === "drawnix" ? "drawnix" : undefined,
       nodes,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  applyElementResize,
   applyElementTransform,
   cloneElement,
   elementIntersectsBox,
@@ -170,6 +171,64 @@ describe('applyElementTransform', () => {
     const transform = makeTransform(element, 'rotate', { x: 160, y: 50 })
     applyElementTransform({ x: 60, y: 150 }, transform, [element])
     expect((element as Extract<CanvasStroke, { type: 'image' }>).rotation).toBeCloseTo(90)
+  })
+})
+
+describe('applyElementResize on mind maps', () => {
+  function makeMindMap(): CanvasStroke {
+    return {
+      type: 'mindmap',
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 200,
+      fontSize: 17,
+      nodes: [{ id: 'root', text: '中心', x: 100, y: 80, width: 168, height: 62 }],
+      edges: [],
+      localId: 'mm-resize',
+    }
+  }
+
+  function resizeBy(element: CanvasStroke, fx: number, fy: number) {
+    const start = cloneElement(element)
+    const geometry = getElementGeometry(start)
+    applyElementResize(element, start, geometry, {
+      left: 0,
+      top: 0,
+      width: geometry.width * fx,
+      height: geometry.height * fy,
+      center: geometry.center,
+    })
+  }
+
+  test('uniform 2× resize scales nodes and records nodeScale', () => {
+    const element = makeMindMap()
+    resizeBy(element, 2, 2)
+    if (element.type !== 'mindmap') throw new Error('expected mindmap')
+    expect(element.nodeScale).toBeCloseTo(2)
+    expect(element.width).toBeCloseTo(800)
+    expect(element.height).toBeCloseTo(400)
+    expect(element.fontSize).toBeCloseTo(34)
+    const root = element.nodes[0]
+    expect(root.width).toBeCloseTo(336)
+    expect(root.x).toBeCloseTo(200)
+  })
+
+  test('non-uniform handles still resize uniformly (average factor)', () => {
+    const element = makeMindMap()
+    resizeBy(element, 3, 1)
+    if (element.type !== 'mindmap') throw new Error('expected mindmap')
+    expect(element.nodeScale).toBeCloseTo(2)
+    expect(element.width).toBeCloseTo(800)
+    expect(element.height).toBeCloseTo(400)
+  })
+
+  test('nodeScale clamps at 3× and geometry follows the clamp', () => {
+    const element = makeMindMap()
+    resizeBy(element, 8, 8)
+    if (element.type !== 'mindmap') throw new Error('expected mindmap')
+    expect(element.nodeScale).toBe(3)
+    expect(element.width).toBeCloseTo(1200)
   })
 })
 

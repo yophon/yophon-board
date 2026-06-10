@@ -439,14 +439,26 @@ export function applyElementResize(
       element.fontSize = Math.max(8, Math.min(160, start.fontSize * ((Math.abs(sx) + Math.abs(sy)) / 2)))
     }
     if (element.type === 'mindmap' && start.type === 'mindmap') {
-      element.fontSize = Math.max(10, Math.min(72, start.fontSize * ((Math.abs(sx) + Math.abs(sy)) / 2)))
+      // Mind maps scale uniformly, and the factor is recorded in nodeScale
+      // so later re-layouts keep the proportions instead of snapping back
+      // to the default layout constants.
+      const k = (Math.abs(sx) + Math.abs(sy)) / 2
+      const startScale = start.nodeScale && start.nodeScale > 0 ? start.nodeScale : 1
+      const nextScale = Math.max(0.5, Math.min(3, startScale * k))
+      const applied = nextScale / startScale
+      element.nodeScale = nextScale
+      element.fontSize = Math.max(8, Math.min(120, start.fontSize * applied))
       element.nodes = start.nodes.map(node => ({
         ...node,
-        x: node.x * Math.abs(sx),
-        y: node.y * Math.abs(sy),
-        width: Math.max(36, node.width * Math.abs(sx)),
-        height: Math.max(24, node.height * Math.abs(sy)),
+        x: node.x * applied,
+        y: node.y * applied,
+        width: node.width * applied,
+        height: node.height * applied,
       }))
+      element.width = Math.max(1, start.width * applied)
+      element.height = Math.max(1, start.height * applied)
+      element.x = nextCenter.x - element.width / 2
+      element.y = nextCenter.y - element.height / 2
     }
     return
   }

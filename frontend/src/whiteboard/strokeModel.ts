@@ -72,6 +72,7 @@ export function createLocalStroke(stroke: StrokeData, page: number): CanvasStrok
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
+      nodeScale: stroke.nodeScale,
       layout: stroke.layout,
       theme: stroke.theme,
       nodes: stroke.nodes.map(node => ({ ...node })),
@@ -149,6 +150,7 @@ export function persistableStroke(stroke: StrokeData): StrokeData {
       height: stroke.height,
       rotation: stroke.rotation ?? 0,
       fontSize: stroke.fontSize,
+      nodeScale: stroke.nodeScale,
       layout: stroke.layout,
       theme: stroke.theme,
       nodes: stroke.nodes.map(node => ({ ...node })),
@@ -277,6 +279,7 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
             }))
             .filter(edge => nodeIds.has(edge.from) && nodeIds.has(edge.to))
         : []
+      const rawNodeScale = Number(stroke.nodeScale)
       const mindmap = {
         id: row.id,
         created_at: row.created_at,
@@ -287,6 +290,9 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
         height: Number(stroke.height),
         rotation: Number.isFinite(Number(stroke.rotation)) ? Number(stroke.rotation) : 0,
         fontSize: Number.isFinite(Number(stroke.fontSize)) ? Number(stroke.fontSize) : 18,
+        nodeScale: Number.isFinite(rawNodeScale) && rawNodeScale > 0
+          ? Math.min(3, Math.max(0.5, rawNodeScale))
+          : undefined,
         layout: stroke.layout === 'mind' ? 'mind' as const : undefined,
         theme: stroke.theme === 'drawnix' ? 'drawnix' as const : undefined,
         nodes,

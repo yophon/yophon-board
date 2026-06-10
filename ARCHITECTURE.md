@@ -49,6 +49,7 @@ The current realtime model is single-process. If the app moves to multiple insta
 - `composables/useWhiteboardTextEditor.ts`: inline text editor open/type/style/commit/cancel.
 - `composables/useApi.ts`: JSON API wrapper; throws `ApiError(status, message)` with the server-provided error text.
 - `whiteboard/*`: pure modules — `types.ts` (domain types; wire types re-exported from `shared/types.ts`), `strokeModel.ts`, `pendingStorage.ts` (per-page unsaved-stroke mirror), `renderer.ts`, `geometry.ts`, `selection.ts`, `eraser.ts`, `textLayout.ts`, `mindmap.ts`, `pdfRenderer.ts`.
+- Mind maps are always auto-laid-out: node drag is a pure reattach preview (`resolveMindMapDropTarget` → `reattachMindMapNode` on drop), element resize records a uniform `nodeScale` that every layout constant is multiplied by, and structure mutations (add/delete/reattach/text) push snapshot entries onto the undo stack.
 - `stores/auth.ts`: admin auth state.
 
 Rendering: all repaints go through a single rAF-coalesced `requestRender()`. While a pen/mask-eraser stroke is in progress the static scene is cached in an offscreen canvas and only the live stroke is drawn per frame; `notifyStrokesChanged()` invalidates that cache. The mini-map repaints at most ~6 fps.

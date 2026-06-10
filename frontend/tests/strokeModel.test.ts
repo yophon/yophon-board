@@ -123,6 +123,31 @@ describe('parseStrokeRow', () => {
     expect(parsed.height).toBe(120)
   })
 
+  test('mindmap nodeScale parses and clamps', () => {
+    const base = {
+      type: 'mindmap',
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300,
+      fontSize: 18,
+      nodes: [{ id: 'root', text: '中心', x: 10, y: 10, width: 100, height: 40 }],
+      edges: [],
+    }
+    const parsed = parseStrokeRow(row({ ...base, nodeScale: 2 }))
+    if (!parsed || parsed.type !== 'mindmap') throw new Error('expected mindmap stroke')
+    expect(parsed.nodeScale).toBe(2)
+    expect(persistableStroke(parsed)).toMatchObject({ nodeScale: 2 })
+
+    const clamped = parseStrokeRow(row({ ...base, nodeScale: 10 }))
+    if (!clamped || clamped.type !== 'mindmap') throw new Error('expected mindmap stroke')
+    expect(clamped.nodeScale).toBe(3)
+
+    const legacy = parseStrokeRow(row(base))
+    if (!legacy || legacy.type !== 'mindmap') throw new Error('expected mindmap stroke')
+    expect(legacy.nodeScale).toBeUndefined()
+  })
+
   test('mindmap rows drop edges that reference missing nodes', () => {
     const parsed = parseStrokeRow(row({
       type: 'mindmap',

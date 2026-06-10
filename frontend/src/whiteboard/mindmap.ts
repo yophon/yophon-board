@@ -1,7 +1,9 @@
-import type { MindMapEdgeData, MindMapElementData, MindMapNodeData } from './types'
+import type { MindMapEdgeData, MindMapElementData, MindMapNodeData, Point } from './types'
 
 export const MINDMAP_MAX_NODES = 80
 export const MINDMAP_ROOT_ID = 'root'
+export const MINDMAP_MIN_SCALE = 0.5
+export const MINDMAP_MAX_SCALE = 3
 
 const ROOT_WIDTH = 168
 const ROOT_HEIGHT = 62
@@ -16,8 +18,17 @@ const LEFT_COLOR = '#f4f8ff'
 const RIGHT_COLOR = '#f3fbf6'
 const LEFT_STROKE = '#5b8def'
 const RIGHT_STROKE = '#37a86b'
+/** Pointer must be within this (scaled) distance of a node to drop onto it. */
+const DROP_RANGE = 150
 
 type BranchSide = 'left' | 'right'
+
+export interface MindMapDropTarget {
+  parentId: string
+  /** Insertion index among the parent's (branch-filtered for root) children, dragged node excluded. */
+  index: number
+  branch: BranchSide
+}
 
 interface SubtreeLayout {
   node: MindMapNodeData
@@ -26,43 +37,51 @@ interface SubtreeLayout {
   children: SubtreeLayout[]
 }
 
-export function createDrawnixMindMapTemplate(x: number, y: number, width: number, height: number): MindMapElementData {
+/**
+ * All layout constants are multiplied by the element's `nodeScale`, so a
+ * resized mind map keeps its proportions through later re-layouts instead
+ * of snapping back to the defaults.
+ */
+export function getMindMapScale(element: MindMapElementData): number {
+  const scale = Number(element.nodeScale)
+  if (!Number.isFinite(scale) || scale <= 0) return 1
+  return Math.min(MINDMAP_MAX_SCALE, Math.max(MINDMAP_MIN_SCALE, scale))
+}
+
+/** Centered on (centerX, centerY): a root plus one starter child. */
+export function createDrawnixMindMapTemplate(centerX: number, centerY: number): MindMapElementData {
   const mindmap: MindMapElementData = {
     type: 'mindmap',
-    x,
-    y,
-    width,
-    height,
+    x: 0,
+    y: 0,
+    width: 320,
+    height: 220,
     rotation: 0,
     fontSize: 17,
     layout: 'mind',
     theme: 'drawnix',
     nodes: [
       createMindMapNode(MINDMAP_ROOT_ID, '中心主题', 'right', true),
-      createMindMapNode('right-1', '关键想法', 'right'),
-      createMindMapNode('right-2', '行动项', 'right'),
-      createMindMapNode('left-1', '背景资料', 'left'),
-      createMindMapNode('left-2', '风险问题', 'left'),
+      createMindMapNode('right-1', '子主题', 'right'),
     ],
     edges: [
       createMindMapEdge(MINDMAP_ROOT_ID, 'right-1', 'right'),
-      createMindMapEdge(MINDMAP_ROOT_ID, 'right-2', 'right'),
-      createMindMapEdge(MINDMAP_ROOT_ID, 'left-1', 'left'),
-      createMindMapEdge(MINDMAP_ROOT_ID, 'left-2', 'left'),
     ],
   }
   layoutMindMap(mindmap)
+  mindmap.x = centerX - mindmap.width / 2
+  mindmap.y = centerY - mindmap.height / 2
   return mindmap
 }
 
-export function createMindMapNode(id: string, text = '新节点', branch: BranchSide = 'right', root = false): MindMapNodeData {
+export function createMindMapNode(id: string, text = '新节点', branch: BranchSide = 'right', root = false, scale = 1): MindMapNodeData {
   return {
     id,
     text,
     x: 0,
     y: 0,
-    width: root ? ROOT_WIDTH : NODE_WIDTH,
-    height: root ? ROOT_HEIGHT : NODE_HEIGHT,
+    width: (root ? ROOT_WIDTH : NODE_WIDTH) * scale,
+    height: (root ? ROOT_HEIGHT : NODE_HEIGHT) * scale,
     color: root ? ROOT_COLOR : branch === 'left' ? LEFT_COLOR : RIGHT_COLOR,
     branch,
   }
@@ -98,6 +117,11 @@ export function getMindMapDescendantIds(element: MindMapElementData, nodeId: str
   return ids
 }
 
+/** Descendant count excluding the node itself (shown in the collapse badge). */
+export function countMindMapDescendants(element: MindMapElementData, nodeId: string): number {
+  return getMindMapDescendantIds(element, nodeId).size - 1
+}
+
 export function getVisibleMindMapNodeIds(element: MindMapElementData): Set<string> {
   const ids = new Set<string>()
   const root = getMindMapRoot(element)
@@ -123,7 +147,7 @@ export function addMindMapChildNode(element: MindMapElementData, parentId: strin
   const parent = element.nodes.find(node => node.id === parentId)
   if (!parent) return null
   const branch = resolveNodeBranch(element, parent)
-  const node = createMindMapNode(createMindMapNodeId(element), text, branch)
+  const node = createMindMapNode(createMindMapNodeId(element), text, branch, false, getMindMapScale(element))
   element.nodes.push(node)
   element.edges.push(createMindMapEdge(parent.id, node.id, branch))
   parent.collapsed = false
@@ -163,20 +187,133 @@ export function toggleMindMapNodeCollapsed(element: MindMapElementData, nodeId: 
   return true
 }
 
+/**
+ * Drag-to-reattach: where would the dragged node land if dropped at
+ * `local` (element-local coordinates)? Returns null when the pointer is
+ * too far from any valid parent. Pure preview — nothing is mutated.
+ */
+export function resolveMindMapDropTarget(element: MindMapElementData, draggedId: string, local: Point): MindMapDropTarget | null {
+  const excluded = getMindMapDescendantIds(element, draggedId)
+  const visible = getVisibleMindMapNodeIds(element)
+  const s = getMindMapScale(element)
+
+  let best: { node: MindMapNodeData; distSq: number } | null = null
+  for (const node of element.nodes) {
+    if (excluded.has(node.id) || !visible.has(node.id)) continue
+    const dx = Math.max(node.x - local.x, 0, local.x - (node.x + node.width))
+    const dy = Math.max(node.y - local.y, 0, local.y - (node.y + node.height))
+    const distSq = dx * dx + dy * dy
+    if (!best || distSq < best.distSq) best = { node, distSq }
+  }
+  const range = DROP_RANGE * s
+  if (!best || best.distSq > range * range) return null
+
+  const parent = best.node
+  const branch: BranchSide = parent.id === MINDMAP_ROOT_ID
+    ? (local.x < parent.x + parent.width / 2 ? 'left' : 'right')
+    : (parent.branch || 'right')
+
+  const siblings = getDropSiblings(element, parent.id, branch, draggedId)
+  let index = siblings.length
+  for (let i = 0; i < siblings.length; i++) {
+    if (local.y < siblings[i].y + siblings[i].height / 2) {
+      index = i
+      break
+    }
+  }
+  return { parentId: parent.id, index, branch }
+}
+
+/**
+ * Re-hang `nodeId` under `parentId` at `index` on `branch`. Returns false
+ * for invalid moves (root, cycles, unknown ids) and no-op moves so callers
+ * can skip persisting/undo-recording.
+ */
+export function reattachMindMapNode(element: MindMapElementData, nodeId: string, parentId: string, index: number, branch: BranchSide): boolean {
+  if (nodeId === MINDMAP_ROOT_ID || parentId === nodeId) return false
+  if (getMindMapDescendantIds(element, nodeId).has(parentId)) return false
+  const node = element.nodes.find(item => item.id === nodeId)
+  const parent = element.nodes.find(item => item.id === parentId)
+  if (!node || !parent) return false
+  const oldEdgeIndex = element.edges.findIndex(edge => edge.to === nodeId)
+  if (oldEdgeIndex < 0) return false
+
+  const oldParentId = element.edges[oldEdgeIndex].from
+  if (oldParentId === parentId && (node.branch || 'right') === branch) {
+    const siblings = getDropSiblings(element, parentId, branch, nodeId)
+    const all = getDropSiblings(element, parentId, branch, '')
+    const currentIndex = all.findIndex(item => item.id === nodeId)
+    if (currentIndex >= 0 && Math.min(index, siblings.length) === Math.min(currentIndex, siblings.length)) return false
+  }
+
+  element.edges.splice(oldEdgeIndex, 1)
+
+  // Find where the new edge slots in among the parent's (branch-scoped
+  // for root) child edges so sibling order matches the drop indicator.
+  const nodeMap = new Map(element.nodes.map(item => [item.id, item]))
+  const isRoot = parentId === MINDMAP_ROOT_ID
+  const childEdgeIndexes: number[] = []
+  element.edges.forEach((edge, i) => {
+    if (edge.from !== parentId) return
+    if (isRoot) {
+      const target = nodeMap.get(edge.to)
+      if ((target?.branch || 'right') !== branch) return
+    }
+    childEdgeIndexes.push(i)
+  })
+  const insertAt = index < childEdgeIndexes.length
+    ? childEdgeIndexes[index]
+    : childEdgeIndexes.length
+      ? childEdgeIndexes[childEdgeIndexes.length - 1] + 1
+      : element.edges.length
+  element.edges.splice(insertAt, 0, createMindMapEdge(parentId, nodeId, branch))
+
+  node.branch = branch
+  applyBranchToDescendants(element, node, branch)
+  parent.collapsed = false
+  layoutMindMap(element)
+  return true
+}
+
+function getDropSiblings(element: MindMapElementData, parentId: string, branch: BranchSide, draggedId: string): MindMapNodeData[] {
+  let children = getMindMapChildren(element, parentId).filter(child => child.id !== draggedId)
+  if (parentId === MINDMAP_ROOT_ID) children = children.filter(child => (child.branch || 'right') === branch)
+  return children
+}
+
+/** Collapse badge hit-test in element-local coordinates. */
+export function getMindMapBadgeNodeId(element: MindMapElementData, local: Point): string | null {
+  const s = getMindMapScale(element)
+  const visible = getVisibleMindMapNodeIds(element)
+  const radius = 9 * s + 3
+  for (const node of element.nodes) {
+    if (!visible.has(node.id)) continue
+    if (getMindMapChildren(element, node.id).length === 0) continue
+    const branch = node.branch || 'right'
+    const cx = branch === 'left' ? node.x - 10 * s : node.x + node.width + 10 * s
+    const cy = node.y + node.height / 2
+    const dx = local.x - cx
+    const dy = local.y - cy
+    if (dx * dx + dy * dy <= radius * radius) return node.id
+  }
+  return null
+}
+
 export function getNearestMindMapNodeId(element: MindMapElementData, nodeId: string, direction: 'left' | 'right' | 'up' | 'down'): string | null {
   const current = element.nodes.find(node => node.id === nodeId)
   if (!current) return null
+  const visible = getVisibleMindMapNodeIds(element)
   if (direction === 'left' || direction === 'right') {
     const currentCenter = nodeCenter(current)
     const candidates = element.nodes
-      .filter(node => getVisibleMindMapNodeIds(element).has(node.id) && node.id !== nodeId)
+      .filter(node => visible.has(node.id) && node.id !== nodeId)
       .filter(node => direction === 'left' ? nodeCenter(node).x < currentCenter.x - 8 : nodeCenter(node).x > currentCenter.x + 8)
       .map(node => ({ node, score: Math.abs(nodeCenter(node).y - currentCenter.y) * 3 + Math.abs(nodeCenter(node).x - currentCenter.x) }))
       .sort((a, b) => a.score - b.score)
     return candidates[0]?.node.id || null
   }
 
-  const siblings = getSiblingNodes(element, nodeId).filter(node => getVisibleMindMapNodeIds(element).has(node.id))
+  const siblings = getSiblingNodes(element, nodeId).filter(node => visible.has(node.id))
   const index = siblings.findIndex(node => node.id === nodeId)
   if (index < 0) return null
   const next = direction === 'up' ? siblings[index - 1] : siblings[index + 1]
@@ -191,6 +328,10 @@ export function normalizeMindMap(element: MindMapElementData) {
     root.branch = root.branch || 'right'
     root.color = ROOT_COLOR
   }
+  // Free-position drag is gone; legacy manual nodes return to auto layout.
+  for (const node of element.nodes) {
+    if (node.manualPosition) node.manualPosition = undefined
+  }
   const rootChildren = root ? getMindMapChildren(element, root.id) : []
   rootChildren.forEach((child, index) => {
     child.branch = child.branch || (child.x + child.width / 2 < element.width / 2 || index % 2 === 1 ? 'left' : 'right')
@@ -202,10 +343,11 @@ export function normalizeMindMap(element: MindMapElementData) {
 export function layoutMindMap(element: MindMapElementData) {
   const root = getMindMapRoot(element)
   if (!root) return
+  const s = getMindMapScale(element)
   element.layout = 'mind'
   element.theme = 'drawnix'
-  root.width = Math.max(ROOT_WIDTH, root.width || ROOT_WIDTH)
-  root.height = Math.max(ROOT_HEIGHT, root.height || ROOT_HEIGHT)
+  root.width = Math.max(ROOT_WIDTH * s, root.width || 0)
+  root.height = Math.max(ROOT_HEIGHT * s, root.height || 0)
   root.color = ROOT_COLOR
   root.branch = 'right'
 
@@ -235,63 +377,59 @@ export function layoutMindMap(element: MindMapElementData) {
   for (const child of leftChildren) applyBranchToDescendants(element, child, 'left')
   for (const child of rightChildren) applyBranchToDescendants(element, child, 'right')
 
-  const leftLayouts = leftChildren.map(node => buildSubtreeLayout(element, node, 'left'))
-  const rightLayouts = rightChildren.map(node => buildSubtreeLayout(element, node, 'right'))
+  const leftLayouts = leftChildren.map(node => buildSubtreeLayout(element, node, 'left', s))
+  const rightLayouts = rightChildren.map(node => buildSubtreeLayout(element, node, 'right', s))
   const leftWidth = maxLayoutWidth(leftLayouts)
-  const rightWidth = maxLayoutWidth(rightLayouts)
-  const leftHeight = stackHeight(leftLayouts)
-  const rightHeight = stackHeight(rightLayouts)
-  const rootX = CANVAS_PADDING + leftWidth + (leftWidth > 0 ? ROOT_GAP : 0)
-  const rootY = CANVAS_PADDING + Math.max(leftHeight, rightHeight, root.height) / 2 - root.height / 2
+  const leftHeight = stackHeight(leftLayouts, s)
+  const rightHeight = stackHeight(rightLayouts, s)
+  const rootX = CANVAS_PADDING * s + leftWidth + (leftWidth > 0 ? ROOT_GAP * s : 0)
+  const rootY = CANVAS_PADDING * s + Math.max(leftHeight, rightHeight, root.height) / 2 - root.height / 2
 
-  if (!root.manualPosition) {
-    root.x = rootX
-    root.y = rootY
-  }
+  root.x = rootX
+  root.y = rootY
 
-  placeLayoutStack(element, leftLayouts, 'left', root.x - ROOT_GAP, root.y + root.height / 2 - leftHeight / 2)
-  placeLayoutStack(element, rightLayouts, 'right', root.x + root.width + ROOT_GAP, root.y + root.height / 2 - rightHeight / 2)
+  placeLayoutStack(element, leftLayouts, 'left', root.x - ROOT_GAP * s, root.y + root.height / 2 - leftHeight / 2, s)
+  placeLayoutStack(element, rightLayouts, 'right', root.x + root.width + ROOT_GAP * s, root.y + root.height / 2 - rightHeight / 2, s)
 
   const visibleIds = getVisibleMindMapNodeIds(element)
   const bounds = getNodeBounds(element.nodes.filter(node => visibleIds.has(node.id)))
-  element.width = Math.max(320, bounds.maxX + CANVAS_PADDING)
-  element.height = Math.max(220, bounds.maxY + CANVAS_PADDING, root.y + root.height + CANVAS_PADDING)
+  element.width = Math.max(320 * s, bounds.maxX + CANVAS_PADDING * s)
+  element.height = Math.max(220 * s, bounds.maxY + CANVAS_PADDING * s, root.y + root.height + CANVAS_PADDING * s)
   updateEdgeStrokes(element)
 }
 
-function buildSubtreeLayout(element: MindMapElementData, node: MindMapNodeData, branch: BranchSide): SubtreeLayout {
+function buildSubtreeLayout(element: MindMapElementData, node: MindMapNodeData, branch: BranchSide, s: number): SubtreeLayout {
   node.branch = branch
   node.color = branch === 'left' ? LEFT_COLOR : RIGHT_COLOR
-  node.width = Math.max(96, Math.min(220, node.width || NODE_WIDTH))
-  node.height = Math.max(38, Math.min(78, node.height || NODE_HEIGHT))
-  const childLayouts = node.collapsed ? [] : getMindMapChildren(element, node.id).map(child => buildSubtreeLayout(element, child, branch))
-  const childHeight = stackHeight(childLayouts)
+  node.width = Math.max(96 * s, Math.min(260 * s, node.width || NODE_WIDTH * s))
+  // No max clamp: node height adapts to wrapped text lines.
+  node.height = Math.max(38 * s, node.height || NODE_HEIGHT * s)
+  const childLayouts = node.collapsed ? [] : getMindMapChildren(element, node.id).map(child => buildSubtreeLayout(element, child, branch, s))
+  const childHeight = stackHeight(childLayouts, s)
   const height = Math.max(node.height, childHeight)
-  const width = node.width + (childLayouts.length ? H_GAP + maxLayoutWidth(childLayouts) : 0)
+  const width = node.width + (childLayouts.length ? H_GAP * s + maxLayoutWidth(childLayouts) : 0)
   return { node, width, height, children: childLayouts }
 }
 
-function placeLayoutStack(element: MindMapElementData, layouts: SubtreeLayout[], branch: BranchSide, anchorX: number, startY: number) {
+function placeLayoutStack(element: MindMapElementData, layouts: SubtreeLayout[], branch: BranchSide, anchorX: number, startY: number, s: number) {
   let cursor = startY
   for (const layout of layouts) {
-    placeSubtreeLayout(element, layout, branch, anchorX, cursor)
-    cursor += layout.height + V_GAP
+    placeSubtreeLayout(element, layout, branch, anchorX, cursor, s)
+    cursor += layout.height + V_GAP * s
   }
 }
 
-function placeSubtreeLayout(element: MindMapElementData, layout: SubtreeLayout, branch: BranchSide, anchorX: number, top: number) {
+function placeSubtreeLayout(element: MindMapElementData, layout: SubtreeLayout, branch: BranchSide, anchorX: number, top: number, s: number) {
   const node = layout.node
-  if (!node.manualPosition) {
-    node.x = branch === 'left' ? anchorX - node.width : anchorX
-    node.y = top + layout.height / 2 - node.height / 2
-  }
+  node.x = branch === 'left' ? anchorX - node.width : anchorX
+  node.y = top + layout.height / 2 - node.height / 2
 
   if (layout.children.length === 0) return
-  const childAnchorX = branch === 'left' ? node.x - H_GAP : node.x + node.width + H_GAP
-  let cursor = top + layout.height / 2 - stackHeight(layout.children) / 2
+  const childAnchorX = branch === 'left' ? node.x - H_GAP * s : node.x + node.width + H_GAP * s
+  let cursor = top + layout.height / 2 - stackHeight(layout.children, s) / 2
   for (const child of layout.children) {
-    placeSubtreeLayout(element, child, branch, childAnchorX, cursor)
-    cursor += child.height + V_GAP
+    placeSubtreeLayout(element, child, branch, childAnchorX, cursor, s)
+    cursor += child.height + V_GAP * s
   }
 }
 
@@ -327,9 +465,9 @@ function getSiblingNodes(element: MindMapElementData, nodeId: string): MindMapNo
   return getMindMapChildren(element, parentId)
 }
 
-function stackHeight(layouts: SubtreeLayout[]) {
+function stackHeight(layouts: SubtreeLayout[], s: number) {
   if (layouts.length === 0) return 0
-  return layouts.reduce((sum, item) => sum + item.height, 0) + V_GAP * (layouts.length - 1)
+  return layouts.reduce((sum, item) => sum + item.height, 0) + V_GAP * s * (layouts.length - 1)
 }
 
 function maxLayoutWidth(layouts: SubtreeLayout[]) {

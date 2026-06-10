@@ -83,6 +83,7 @@ export interface MindMapNodeData {
   color?: string
   branch?: 'left' | 'right'
   collapsed?: boolean
+  /** @deprecated Free-position drag was removed; kept on the wire for old rows. */
   manualPosition?: boolean
 }
 
@@ -100,6 +101,12 @@ export interface MindMapElementData {
   height: number
   rotation?: number
   fontSize: number
+  /**
+   * Uniform scale applied to all layout constants (node sizes, gaps,
+   * padding). Set by element resize so the map keeps its proportions
+   * through later re-layouts. Defaults to 1; clamped to [0.5, 3].
+   */
+  nodeScale?: number
   layout?: 'mind'
   theme?: 'drawnix'
   nodes: MindMapNodeData[]

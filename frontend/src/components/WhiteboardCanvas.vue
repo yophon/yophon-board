@@ -31,7 +31,7 @@
       @pointerup.stop
     ></textarea>
     <div
-      v-if="textEditor"
+      v-if="textEditor && !isMindMapTextEditor"
       ref="textToolbarRef"
       class="wb-text-toolbar"
       :style="textToolbarStyle"
@@ -112,20 +112,20 @@
       @pointerup.stop
       @wheel.stop
     >
-      <button class="wb-mindmap-action" @click="editSelectedMindMapNode" title="编辑节点">
+      <button class="wb-mindmap-action" @click="editSelectedMindMapNode" title="编辑节点（双击节点）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
       </button>
-      <button class="wb-mindmap-action" @click="addMindMapChild" title="添加子节点">
+      <button class="wb-mindmap-action" @click="addMindMapChild" title="添加子节点（Tab）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="M9 12h6"/><path d="M18 8v8"/><path d="M14 12h8"/></svg>
       </button>
-      <button class="wb-mindmap-action" @click="addMindMapSibling" title="添加同级节点">
+      <button class="wb-mindmap-action" @click="addMindMapSibling" title="添加同级节点（Enter）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="3"/><circle cx="7" cy="17" r="3"/><path d="M10 7h5"/><path d="M10 17h5"/><path d="M18 10v8"/><path d="M14 14h8"/></svg>
       </button>
-      <button class="wb-mindmap-action" :disabled="!selectedMindMapNodeHasChildren" @click="toggleSelectedMindMapCollapse" title="展开/收起">
+      <button class="wb-mindmap-action" :disabled="!selectedMindMapNodeHasChildren" @click="toggleSelectedMindMapCollapse" title="展开/收起（点击节点旁圆形徽章）">
         <svg v-if="selectedMindMapNode?.collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
         <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
       </button>
-      <button class="wb-mindmap-action wb-mindmap-danger" :disabled="selectedMindMapNodeId === 'root'" @click="deleteMindMapNode" title="删除节点">
+      <button class="wb-mindmap-action wb-mindmap-danger" :disabled="selectedMindMapNodeId === 'root'" @click="deleteMindMapNode" title="删除节点及子树（Delete，可撤销）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
       </button>
     </div>
@@ -304,16 +304,21 @@ import {
   addMindMapChildNode,
   addMindMapSiblingNode,
   createDrawnixMindMapTemplate,
+  getMindMapBadgeNodeId,
   getMindMapChildren,
+  getMindMapScale,
   deleteMindMapNodeById,
   getNearestMindMapNodeId,
   getVisibleMindMapNodeIds,
+  layoutMindMap,
   normalizeMindMap,
+  reattachMindMapNode,
   toggleMindMapNodeCollapsed,
 } from '../whiteboard/mindmap'
 import type { PdfCache } from '../whiteboard/pdfRenderer'
 import { probePdf } from '../whiteboard/pdfRenderer'
 import {
+  cloneElement,
   elementKey,
   getElementHandlePoints,
   getElementWorldCorners,
@@ -333,6 +338,7 @@ import {
   DEFAULT_TEXT_WIDTH,
   TEXT_FONT_FAMILY,
   measureTextBox,
+  wrapTextLines,
 } from '../whiteboard/textLayout'
 import type {
   CanvasStroke,
@@ -544,7 +550,7 @@ const canvasCursor = computed(() => {
   if (isPanning.value) return 'grabbing'
   if (currentTool.value === 'drag' || spaceHeld.value) return 'grab'
   if (currentTool.value === 'text') return 'text'
-  if (currentTool.value === 'select') return 'default'
+  if (currentTool.value === 'select') return hoveredMindMap.value ? 'pointer' : 'default'
   return 'crosshair'
 })
 const textEditorStyle = computed(() => {
@@ -564,6 +570,10 @@ const textEditorStyle = computed(() => {
     fontStyle: editor.italic ? 'italic' : 'normal',
     textAlign: editor.align,
     transform: `rotate(${editor.rotation}deg)`,
+    // Mind-map editors are positioned at the node's rotated top-left, so
+    // the rotation must pivot there; plain text rotates around its center
+    // to match the canvas renderer.
+    transformOrigin: isMindMapEditor ? 'top left' : 'center',
   }
 })
 const textToolbarStyle = computed(() => {
@@ -677,6 +687,28 @@ function getEditingMindMapNode() {
   return { elementKey: elementKeyPart, nodeId }
 }
 
+/** Record a mind map's pre-mutation state so the operation is undoable. */
+function snapshotMindMap(element: CanvasStroke): CanvasStroke {
+  return cloneElement(element)
+}
+
+/** Grow/shrink a node's height to fit its wrapped text (renderer metrics). */
+function fitMindMapNodeHeight(element: MindMapElementData & CanvasStroke, node: MindMapNodeData) {
+  const ctx = canvasRef.value?.getContext('2d')
+  const s = getMindMapScale(element)
+  const isRoot = node.id === 'root'
+  const fontSize = isRoot ? element.fontSize + 1 : element.fontSize
+  let lineCount = 1
+  if (ctx) {
+    ctx.save()
+    ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+    lineCount = Math.max(1, wrapTextLines(ctx, node.text, Math.max(1, node.width - 22 * s)).length)
+    ctx.restore()
+  }
+  const minHeight = (isRoot ? 62 : 38) * s
+  node.height = Math.max(minHeight, Math.ceil(lineCount * fontSize * 1.2 + 16 * s))
+}
+
 // —— tools ——
 
 function selectPreset(i: number) {
@@ -693,6 +725,7 @@ function setTool(tool: WhiteboardTool) {
   isErasing.value = false
   lastErasePoint = null
   currentStroke.value = null
+  hoveredMindMap.value = null
   if (tool === 'eraser') currentWidth.value = eraserWidth.value
   if (tool !== 'eraser') eraserMenuOpen.value = false
   if (tool !== 'select') clearSelection()
@@ -891,9 +924,99 @@ function renderFrame() {
     ctx.scale(scale.value, scale.value)
     drawSelectedElementOverlay(ctx)
     drawSelectionBox(ctx)
+    drawMindMapHoverOverlay(ctx)
+    drawMindMapDragPreview(ctx)
     ctx.restore()
   }
   requestMiniMapRender()
+}
+
+/** Enter the element-local coordinate space of a (possibly rotated) mind map. */
+function applyMindMapElementTransform(ctx: CanvasRenderingContext2D, element: MindMapElementData & CanvasStroke) {
+  ctx.translate(element.x + element.width / 2, element.y + element.height / 2)
+  ctx.rotate(degreesToRadians(element.rotation ?? 0))
+  ctx.translate(-element.width / 2, -element.height / 2)
+}
+
+function drawMindMapHoverOverlay(ctx: CanvasRenderingContext2D) {
+  const hovered = hoveredMindMap.value
+  if (!hovered || hovered.badge) return
+  if (isMindMapNodeDragging.value || isElementTransforming.value) return
+  const element = allStrokes.value.find(stroke => elementKey(stroke) === hovered.key)
+  if (!element || element.type !== 'mindmap') return
+  const node = element.nodes.find(item => item.id === hovered.nodeId)
+  if (!node) return
+  // The selected node already has its own (stronger) outline.
+  if (selectedMindMapElement.value === element && selectedMindMapNodeId.value === node.id) return
+  const s = getMindMapScale(element)
+  ctx.save()
+  ctx.globalAlpha = 1
+  ctx.globalCompositeOperation = 'source-over'
+  applyMindMapElementTransform(ctx, element)
+  ctx.strokeStyle = 'rgba(66,133,244,.65)'
+  ctx.lineWidth = 1.8 / scale.value
+  drawRoundRectPath(ctx, node.x - 3 * s, node.y - 3 * s, node.width + 6 * s, node.height + 6 * s, 10 * s)
+  ctx.stroke()
+  ctx.restore()
+}
+
+function drawMindMapDragPreview(ctx: CanvasRenderingContext2D) {
+  const drag = selection.getNodeDragPreview()
+  if (!drag?.active) return
+  const element = drag.element
+  const node = element.nodes.find(item => item.id === drag.nodeId)
+  if (!node) return
+  const s = getMindMapScale(element)
+  ctx.save()
+  ctx.globalAlpha = 1
+  ctx.globalCompositeOperation = 'source-over'
+  applyMindMapElementTransform(ctx, element)
+
+  const target = drag.target
+  if (target) {
+    const parent = element.nodes.find(item => item.id === target.parentId)
+    if (parent) {
+      // Highlight the future parent…
+      ctx.strokeStyle = '#f9ab00'
+      ctx.lineWidth = 2.2 / scale.value
+      drawRoundRectPath(ctx, parent.x - 4 * s, parent.y - 4 * s, parent.width + 8 * s, parent.height + 8 * s, 12 * s)
+      ctx.stroke()
+      // …and where among its children the node will land.
+      const siblings = getMindMapChildren(element, parent.id)
+        .filter(child => child.id !== drag.nodeId)
+        .filter(child => target.parentId !== 'root' || (child.branch || 'right') === target.branch)
+      const anchorX = target.branch === 'left' ? parent.x - 30 * s : parent.x + parent.width + 30 * s
+      let indicatorY: number
+      if (siblings.length === 0) indicatorY = parent.y + parent.height / 2
+      else if (target.index >= siblings.length) {
+        const last = siblings[siblings.length - 1]
+        indicatorY = last.y + last.height + 10 * s
+      } else if (target.index === 0) indicatorY = siblings[0].y - 10 * s
+      else {
+        const above = siblings[target.index - 1]
+        const below = siblings[target.index]
+        indicatorY = (above.y + above.height + below.y) / 2
+      }
+      ctx.strokeStyle = '#f9ab00'
+      ctx.lineWidth = 3 / scale.value
+      ctx.beginPath()
+      ctx.moveTo(anchorX - 18 * s, indicatorY)
+      ctx.lineTo(anchorX + 18 * s, indicatorY)
+      ctx.stroke()
+    }
+  }
+
+  // Ghost of the dragged node following the pointer.
+  ctx.globalAlpha = 0.55
+  const ghostX = drag.currentLocal.x - node.width / 2
+  const ghostY = drag.currentLocal.y - node.height / 2
+  ctx.fillStyle = node.color || '#ffffff'
+  drawRoundRectPath(ctx, ghostX, ghostY, node.width, node.height, 8 * s)
+  ctx.fill()
+  ctx.strokeStyle = target ? '#f9ab00' : 'rgba(32,33,36,.6)'
+  ctx.lineWidth = 1.4 / scale.value
+  ctx.stroke()
+  ctx.restore()
 }
 
 function drawSelectedElementOverlay(ctx: CanvasRenderingContext2D) {
@@ -1133,6 +1256,35 @@ function resizeCanvas() {
 
 // —— pointer events ——
 
+/** Mind-map node / collapse badge under the idle pointer (select tool). */
+const hoveredMindMap = ref<{ key: string; nodeId: string; badge: boolean } | null>(null)
+
+function hitTestMindMapBadge(point: Point): { element: MindMapElementData & CanvasStroke; nodeId: string } | null {
+  for (const stroke of [...allStrokes.value].reverse()) {
+    if (stroke.type !== 'mindmap') continue
+    const nodeId = getMindMapBadgeNodeId(stroke, worldToMindMapLocal(point, stroke))
+    if (nodeId) return { element: stroke, nodeId }
+  }
+  return null
+}
+
+function updateMindMapHover(worldPoint: Point) {
+  let next: { key: string; nodeId: string; badge: boolean } | null = null
+  if (currentTool.value === 'select') {
+    const badgeHit = hitTestMindMapBadge(worldPoint)
+    if (badgeHit) {
+      next = { key: elementKey(badgeHit.element), nodeId: badgeHit.nodeId, badge: true }
+    } else {
+      const nodeHit = hitTestMindMapNode(worldPoint)
+      if (nodeHit) next = { key: elementKey(nodeHit.element), nodeId: nodeHit.node.id, badge: false }
+    }
+  }
+  const prev = hoveredMindMap.value
+  if (prev?.key === next?.key && prev?.nodeId === next?.nodeId && prev?.badge === next?.badge) return
+  hoveredMindMap.value = next
+  requestRender()
+}
+
 function hitTestMindMapNode(point: Point, element?: CanvasStroke): { element: MindMapElementData & CanvasStroke; node: MindMapNodeData } | null {
   const candidates = element
     ? [element]
@@ -1189,9 +1341,29 @@ function onPointerDown(e: PointerEvent) {
     return
   }
 
+  const badgeHit = currentTool.value === 'select' ? hitTestMindMapBadge(worldPoint) : null
+  if (badgeHit) {
+    e.preventDefault()
+    setSelectedElements([badgeHit.element])
+    selectedMindMapNodeId.value = badgeHit.nodeId
+    if (toggleMindMapNodeCollapsed(badgeHit.element, badgeHit.nodeId)) {
+      notifyStrokesChanged()
+      void persist.saveElementTransform(badgeHit.element)
+    }
+    return
+  }
+
   const nodeHit = currentTool.value === 'select' ? hitTestMindMapNode(worldPoint) : null
   if (nodeHit) {
     e.preventDefault()
+    if (nodeHit.node.id === 'root') {
+      // Dragging the root moves the whole mind map.
+      setSelectedElements([nodeHit.element])
+      selectedMindMapNodeId.value = 'root'
+      selection.beginTransform('move', worldPoint)
+      requestRender()
+      return
+    }
     selection.beginNodeDrag(nodeHit.element, nodeHit.node.id, worldPoint)
     requestRender()
     return
@@ -1260,8 +1432,9 @@ function onPointerMove(e: PointerEvent) {
   }
 
   if (isMindMapNodeDragging.value) {
+    // Pure preview: the drag only updates the ghost + drop indicator.
     selection.updateNodeDrag(screenToWorld(e.clientX, e.clientY))
-    notifyStrokesChanged()
+    requestRender()
     return
   }
 
@@ -1287,7 +1460,10 @@ function onPointerMove(e: PointerEvent) {
     return
   }
 
-  if (!isDrawing.value || !currentStroke.value) return
+  if (!isDrawing.value || !currentStroke.value) {
+    updateMindMapHover(screenToWorld(e.clientX, e.clientY))
+    return
+  }
   const pt = screenToWorld(e.clientX, e.clientY)
   currentStroke.value.points.push(pt)
   requestRender()
@@ -1315,8 +1491,16 @@ function onPointerUp(e: PointerEvent) {
   }
 
   if (isMindMapNodeDragging.value) {
-    const element = selection.endNodeDrag()
-    if (element) void persist.saveElementTransform(element)
+    const drag = selection.endNodeDrag()
+    if (drag?.active && drag.target) {
+      const element = drag.element
+      const before = snapshotMindMap(element)
+      if (reattachMindMapNode(element, drag.nodeId, drag.target.parentId, drag.target.index, drag.target.branch)) {
+        history.pushMutation(element, before)
+        void persist.saveElementTransform(element)
+      }
+    }
+    notifyStrokesChanged()
     return
   }
 
@@ -1472,15 +1656,10 @@ function insertText() {
 }
 
 function insertMindMap() {
-  const canvas = canvasRef.value
-  const rect = canvas?.getBoundingClientRect()
-  const viewportWidth = (rect?.width || 800) / scale.value
-  const viewportHeight = (rect?.height || 600) / scale.value
-  const width = Math.min(760, Math.max(520, viewportWidth * 0.58))
-  const height = Math.min(420, Math.max(300, viewportHeight * 0.5))
+  const rect = canvasRef.value?.getBoundingClientRect()
   const centerX = ((rect?.width || 800) / 2 - offsetX.value) / scale.value
   const centerY = ((rect?.height || 600) / 2 - offsetY.value) / scale.value
-  const mindmap = createLocalStroke(createDrawnixMindMapTemplate(centerX - width / 2, centerY - height / 2, width, height), currentPage.value)
+  const mindmap = createLocalStroke(createDrawnixMindMapTemplate(centerX, centerY), currentPage.value)
 
   allStrokes.value.push(mindmap)
   history.push(mindmap)
@@ -1488,8 +1667,9 @@ function insertMindMap() {
   setSelectedElements([mindmap])
   selectedMindMapNodeId.value = 'root'
   void persist.saveStroke(mindmap)
-  showTransientStatus('思维导图已添加')
   notifyStrokesChanged()
+  // Jump straight into naming the root — the usual first action.
+  beginMindMapEdit(mindmap, 'root')
 }
 
 function beginTextInsertion(point: Point) {
@@ -1564,8 +1744,10 @@ function addMindMapChild() {
     saveError.value = `思维导图节点最多 ${MINDMAP_MAX_NODES} 个`
     return
   }
+  const before = snapshotMindMap(element)
   const node = addMindMapChildNode(element, parent.id)
   if (!node) return
+  history.pushMutation(element, before)
   selectedMindMapNodeId.value = node.id
   notifyStrokesChanged()
   void persist.saveElementTransform(element)
@@ -1580,8 +1762,10 @@ function addMindMapSibling() {
     saveError.value = `思维导图节点最多 ${MINDMAP_MAX_NODES} 个`
     return
   }
+  const before = snapshotMindMap(element)
   const sibling = addMindMapSiblingNode(element, node.id)
   if (!sibling) return
+  history.pushMutation(element, before)
   selectedMindMapNodeId.value = sibling.id
   notifyStrokesChanged()
   void persist.saveElementTransform(element)
@@ -1592,7 +1776,9 @@ function deleteMindMapNode() {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
   if (!element || !node || node.id === 'root') return
+  const before = snapshotMindMap(element)
   selectedMindMapNodeId.value = deleteMindMapNodeById(element, node.id)
+  history.pushMutation(element, before)
   notifyStrokesChanged()
   void persist.saveElementTransform(element)
 }
@@ -1618,13 +1804,19 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
     if (element?.type === 'mindmap') {
       const node = element.nodes.find(item => item.id === nodeId)
       if (node) {
-        node.text = commit.text
-        node.width = Math.max(node.width, Math.min(260, commit.width))
-        node.height = Math.max(node.height, Math.min(90, commit.height))
+        if (node.text !== commit.text) {
+          const before = snapshotMindMap(element)
+          const s = getMindMapScale(element)
+          node.text = commit.text
+          node.width = Math.max(node.width, Math.min(260 * s, commit.width))
+          fitMindMapNodeHeight(element, node)
+          layoutMindMap(element)
+          history.pushMutation(element, before)
+          notifyStrokesChanged()
+          void persist.saveElementTransform(element)
+        }
         setSelectedElements([element])
         selectedMindMapNodeId.value = node.id
-        notifyStrokesChanged()
-        await persist.saveElementTransform(element)
       }
     }
     return
@@ -1991,12 +2183,6 @@ function handleMindMapKeyDown(e: KeyboardEvent) {
     return true
   }
 
-  if (e.key === ' ' && selectedMindMapNodeHasChildren.value) {
-    e.preventDefault()
-    toggleSelectedMindMapCollapse()
-    return true
-  }
-
   const direction = e.key === 'ArrowLeft'
     ? 'left'
     : e.key === 'ArrowRight'
@@ -2027,8 +2213,38 @@ function isEditableKeyboardTarget(target: EventTarget | null) {
 // —— commands: undo / clear / retry ——
 
 async function undoLastStroke() {
-  const target = history.pop()
-  if (!target) return
+  const entry = history.pop()
+  if (!entry) return
+
+  if (entry.kind === 'mutate') {
+    const element = entry.element
+    if (!allStrokes.value.includes(element)) {
+      // The element was deleted in the meantime — skip to the next entry.
+      void undoLastStroke()
+      return
+    }
+    // Restore the snapshot's content while keeping the element's current
+    // identity and runtime sync state.
+    Object.assign(element, cloneElement(entry.before), {
+      id: element.id,
+      localId: element.localId,
+      created_at: element.created_at,
+      page: element.page,
+      pending: element.pending,
+      failed: element.failed,
+      retryCount: element.retryCount,
+      retryTimer: element.retryTimer,
+      transformRetryTimer: element.transformRetryTimer,
+    })
+    if (element.type === 'mindmap' && selectedMindMapNodeId.value && !element.nodes.some(node => node.id === selectedMindMapNodeId.value)) {
+      selectedMindMapNodeId.value = 'root'
+    }
+    notifyStrokesChanged()
+    void persist.saveElementTransform(element)
+    return
+  }
+
+  const target = entry.stroke
   if (!target.id) {
     allStrokes.value = allStrokes.value.filter(stroke => stroke !== target)
     persist.markUnsavedStrokeDiscarded(target)

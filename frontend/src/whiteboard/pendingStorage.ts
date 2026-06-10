@@ -120,6 +120,7 @@ function serializePendingStroke(stroke: CanvasStroke) {
       height: stroke.height,
       rotation: stroke.rotation,
       fontSize: stroke.fontSize,
+      nodeScale: stroke.nodeScale,
       layout: stroke.layout,
       theme: stroke.theme,
       nodes: stroke.nodes.map(node => ({ ...node })),

@@ -1,5 +1,5 @@
 import { ref, type Ref } from 'vue'
-import { layoutMindMap } from '../whiteboard/mindmap'
+import { resolveMindMapDropTarget, type MindMapDropTarget } from '../whiteboard/mindmap'
 import {
   applyElementTransform,
   cloneElement,
@@ -15,12 +15,23 @@ import {
 } from '../whiteboard/selection'
 import type { CanvasStroke, MindMapElementData, MindMapNodeData, Point } from '../whiteboard/types'
 
+/**
+ * Drag-to-reattach preview. Nothing is mutated while dragging — the tree
+ * only changes when the caller applies the resolved drop target on
+ * pointer-up, so cancelling (Escape) costs nothing.
+ */
 export interface MindMapNodeDragState {
   element: MindMapElementData & CanvasStroke
   nodeId: string
-  startPointer: Point
-  startNode: MindMapNodeData
+  startLocal: Point
+  currentLocal: Point
+  /** True once the pointer moved far enough to count as a drag (vs a click). */
+  active: boolean
+  target: MindMapDropTarget | null
 }
+
+/** Element-local distance the pointer must travel before a drag starts. */
+const NODE_DRAG_THRESHOLD = 8
 
 interface UseWhiteboardSelectionOptions {
   strokes: Ref<CanvasStroke[]>
@@ -135,7 +146,7 @@ export function useWhiteboardSelection(options: UseWhiteboardSelectionOptions) {
     return true
   }
 
-  // —— mind-map node drag ——
+  // —— mind-map node drag (reattach preview) ——
 
   function beginNodeDrag(element: MindMapElementData & CanvasStroke, nodeId: string, worldPoint: Point) {
     const node = element.nodes.find(item => item.id === nodeId)
@@ -143,53 +154,50 @@ export function useWhiteboardSelection(options: UseWhiteboardSelectionOptions) {
     selectedMindMapNodeId.value = nodeId
     if (!isElementSelected(element)) setSelectedElements([element])
     isMindMapNodeDragging.value = true
+    const local = worldToMindMapLocal(worldPoint, element)
     mindMapNodeDrag = {
       element,
       nodeId,
-      startPointer: worldToMindMapLocal(worldPoint, element),
-      startNode: { ...node },
+      startLocal: local,
+      currentLocal: local,
+      active: false,
+      target: null,
     }
   }
 
   function updateNodeDrag(worldPoint: Point) {
-    if (!mindMapNodeDrag || mindMapNodeDrag.element.type !== 'mindmap') return
-    const element = mindMapNodeDrag.element
-    const node = element.nodes.find(item => item.id === mindMapNodeDrag?.nodeId)
-    if (!node) return
-    const local = worldToMindMapLocal(worldPoint, element)
-    const dx = local.x - mindMapNodeDrag.startPointer.x
-    const dy = local.y - mindMapNodeDrag.startPointer.y
-    node.x = Math.max(8, mindMapNodeDrag.startNode.x + dx)
-    node.y = Math.max(8, mindMapNodeDrag.startNode.y + dy)
-    node.manualPosition = true
-    if (node.id !== 'root') {
-      const root = element.nodes.find(item => item.id === 'root')
-      if (root) node.branch = node.x + node.width / 2 < root.x + root.width / 2 ? 'left' : 'right'
+    const drag = mindMapNodeDrag
+    if (!drag || drag.element.type !== 'mindmap') return
+    const local = worldToMindMapLocal(worldPoint, drag.element)
+    drag.currentLocal = local
+    if (!drag.active) {
+      const dx = local.x - drag.startLocal.x
+      const dy = local.y - drag.startLocal.y
+      if (dx * dx + dy * dy < NODE_DRAG_THRESHOLD * NODE_DRAG_THRESHOLD) return
+      drag.active = true
     }
-    layoutMindMap(element)
-    selectedMindMapNodeId.value = node.id
+    drag.target = drag.nodeId === 'root' ? null : resolveMindMapDropTarget(drag.element, drag.nodeId, local)
   }
 
-  /** Finish the drag and return the element that needs persisting (if any). */
-  function endNodeDrag(): CanvasStroke | null {
-    const element = mindMapNodeDrag?.element ?? null
+  /** Finish the drag; the caller applies `target` (when set) and persists. */
+  function endNodeDrag(): MindMapNodeDragState | null {
+    const drag = mindMapNodeDrag
     isMindMapNodeDragging.value = false
     mindMapNodeDrag = null
-    return element
+    return drag
   }
 
-  /** Abort the drag and restore the node's pre-drag position. Returns whether a drag was active. */
+  /** Abort the drag. Pure preview — nothing to restore. */
   function cancelNodeDrag(): boolean {
     if (!isMindMapNodeDragging.value || !mindMapNodeDrag) return false
-    const element = mindMapNodeDrag.element
-    const node = element.nodes.find(item => item.id === mindMapNodeDrag?.nodeId)
-    if (node) {
-      Object.assign(node, mindMapNodeDrag.startNode)
-      layoutMindMap(element)
-    }
     isMindMapNodeDragging.value = false
     mindMapNodeDrag = null
     return true
+  }
+
+  /** Live drag state for rendering the ghost node and drop indicator. */
+  function getNodeDragPreview(): MindMapNodeDragState | null {
+    return mindMapNodeDrag
   }
 
   /** Whether the given element is in the middle of a transform or node drag. */
@@ -272,6 +280,7 @@ export function useWhiteboardSelection(options: UseWhiteboardSelectionOptions) {
     updateNodeDrag,
     endNodeDrag,
     cancelNodeDrag,
+    getNodeDragPreview,
     isElementInteracting,
     beginBoxSelect,
     updateBoxSelect,
