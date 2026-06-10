@@ -206,22 +206,35 @@ export function resolveMindMapDropTarget(element: MindMapElementData, draggedId:
     if (!best || distSq < best.distSq) best = { node, distSq }
   }
   const range = DROP_RANGE * s
-  if (!best || best.distSq > range * range) return null
+  if (!best || best.distSq > range * range) {
+    // Empty-space fallback: dropping into open space around the map
+    // re-hangs the node under the root on the pointer's side, so moving a
+    // child between the left and right branches is a plain drag. The zone
+    // extends generously sideways (that's where the empty side lives) and
+    // modestly vertically; dragging far off still cancels.
+    const root = getMindMapRoot(element)
+    if (!root || excluded.has(root.id)) return null
+    const padX = 360 * s
+    const padY = 120 * s
+    if (local.x < -padX || local.y < -padY || local.x > element.width + padX || local.y > element.height + padY) return null
+    const branch: BranchSide = local.x < root.x + root.width / 2 ? 'left' : 'right'
+    return { parentId: root.id, index: dropIndexByY(element, root.id, branch, draggedId, local), branch }
+  }
 
   const parent = best.node
   const branch: BranchSide = parent.id === MINDMAP_ROOT_ID
     ? (local.x < parent.x + parent.width / 2 ? 'left' : 'right')
     : (parent.branch || 'right')
 
-  const siblings = getDropSiblings(element, parent.id, branch, draggedId)
-  let index = siblings.length
+  return { parentId: parent.id, index: dropIndexByY(element, parent.id, branch, draggedId, local), branch }
+}
+
+function dropIndexByY(element: MindMapElementData, parentId: string, branch: BranchSide, draggedId: string, local: Point): number {
+  const siblings = getDropSiblings(element, parentId, branch, draggedId)
   for (let i = 0; i < siblings.length; i++) {
-    if (local.y < siblings[i].y + siblings[i].height / 2) {
-      index = i
-      break
-    }
+    if (local.y < siblings[i].y + siblings[i].height / 2) return i
   }
-  return { parentId: parent.id, index, branch }
+  return siblings.length
 }
 
 /**
@@ -363,16 +376,8 @@ export function layoutMindMap(element: MindMapElementData) {
     if (branch === 'left') leftChildren.push(child)
     else rightChildren.push(child)
   })
-  if (leftChildren.length === 0 && rightChildren.length > 2) {
-    const moved = rightChildren.splice(1, 1)[0]
-    moved.branch = 'left'
-    leftChildren.push(moved)
-  }
-  if (rightChildren.length === 0 && leftChildren.length > 1) {
-    const moved = leftChildren.splice(0, 1)[0]
-    moved.branch = 'right'
-    rightChildren.push(moved)
-  }
+  // No auto-balancing: which side a child sits on is the user's choice
+  // (made by dragging); the layout only honors it.
 
   for (const child of leftChildren) applyBranchToDescendants(element, child, 'left')
   for (const child of rightChildren) applyBranchToDescendants(element, child, 'right')

@@ -77,6 +77,18 @@ describe('layoutMindMap with nodeScale', () => {
   })
 })
 
+describe('layoutMindMap branch freedom', () => {
+  test('keeps all children on one side without auto-balancing', () => {
+    const element = makeTree()
+    for (const node of element.nodes) {
+      if (node.id !== 'root') node.branch = 'right'
+    }
+    layoutMindMap(element)
+    const rootChildren = getMindMapChildren(element, 'root')
+    expect(rootChildren.every(node => node.branch === 'right')).toBe(true)
+  })
+})
+
 describe('normalizeMindMap', () => {
   test('clears legacy manualPosition flags so nodes rejoin auto layout', () => {
     const element = makeTree()
@@ -144,6 +156,21 @@ describe('resolveMindMapDropTarget', () => {
   test('far away from any node yields null', () => {
     const element = makeTree()
     expect(resolveMindMapDropTarget(element, 'b', { x: -5000, y: -5000 })).toBeNull()
+  })
+
+  test('empty space around the map falls back to a root child on the pointer side', () => {
+    const element = makeTree()
+    const root = element.nodes.find(n => n.id === 'root')!
+    const rootMidY = root.y + root.height / 2
+    // Beyond the leftmost node (c) by more than the drop range, but inside
+    // the horizontal fallback zone.
+    const farLeft = resolveMindMapDropTarget(element, 'b', { x: -170, y: rootMidY })
+    expect(farLeft).toMatchObject({ parentId: 'root', branch: 'left' })
+    // Past the right edge of the element.
+    const farRight = resolveMindMapDropTarget(element, 'b', { x: element.width + 200, y: rootMidY })
+    expect(farRight).toMatchObject({ parentId: 'root', branch: 'right' })
+    // Way off vertically still cancels.
+    expect(resolveMindMapDropTarget(element, 'b', { x: -170, y: element.height + 500 })).toBeNull()
   })
 
   test('the dragged subtree is never a drop target', () => {

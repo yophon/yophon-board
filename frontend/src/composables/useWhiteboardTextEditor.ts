@@ -43,6 +43,12 @@ interface UseWhiteboardTextEditorOptions {
   measureBox: (text: string, fontSize: number, width: number, bold: boolean, italic: boolean) => MeasuredTextBox
   /** Called when the editor commits with non-empty text. Caller handles persistence. */
   onCommit: (commit: TextEditorCommit) => Promise<void> | void
+  /**
+   * Called when the editor closes without producing a commit (Escape, or a
+   * commit whose trimmed text is empty). Callers that mirror the draft into
+   * live state (mind-map nodes) restore their snapshot here.
+   */
+  onCancel?: () => void
   /** Called whenever the editor state changes in a way the canvas should re-render. */
   onChange: () => void
 }
@@ -155,6 +161,7 @@ export function useWhiteboardTextEditor(options: UseWhiteboardTextEditorOptions)
 
   function cancel() {
     editor.value = null
+    options.onCancel?.()
     options.onChange()
   }
 
@@ -164,6 +171,7 @@ export function useWhiteboardTextEditor(options: UseWhiteboardTextEditorOptions)
     editor.value = null
     const text = current.text.trim()
     if (!text) {
+      options.onCancel?.()
       options.onChange()
       return
     }

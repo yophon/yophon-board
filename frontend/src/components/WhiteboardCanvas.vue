@@ -23,7 +23,7 @@
       :class="{ 'wb-text-editor-mindmap': isMindMapTextEditor }"
       :style="textEditorStyle"
       :value="textEditor.text"
-      @input="onTextEditorInput"
+      @input="onTextEditorInputWrapped"
       @blur="onTextEditorBlur"
       @keydown.stop="onTextEditorKeyDown"
       @pointerdown.stop
@@ -332,7 +332,7 @@ import {
   type DrawingStroke,
   type TextStroke,
 } from '../whiteboard/selection'
-import { createLocalStroke } from '../whiteboard/strokeModel'
+import { createLocalStroke, persistableStroke } from '../whiteboard/strokeModel'
 import {
   DEFAULT_TEXT_FONT_SIZE,
   DEFAULT_TEXT_WIDTH,
@@ -510,6 +510,7 @@ const {
   textToolbarRef,
   measureBox: (text, fontSize, width, bold, italic) => measureInsertedText(text, fontSize, width, bold, italic),
   onCommit: applyTextEditorCommit,
+  onCancel: onTextEditorCancelled,
   onChange: () => requestRender(),
 })
 
@@ -553,16 +554,66 @@ const canvasCursor = computed(() => {
   if (currentTool.value === 'select') return hoveredMindMap.value ? 'pointer' : 'default'
   return 'crosshair'
 })
+/** The mind-map element + node currently being edited inline (if any). */
+const editingMindMapInfo = computed(() => {
+  const info = getEditingMindMapNode()
+  if (!info) return null
+  const element = allStrokes.value.find(stroke => elementKey(stroke) === info.elementKey)
+  if (!element || element.type !== 'mindmap') return null
+  const node = element.nodes.find(item => item.id === info.nodeId)
+  if (!node) return null
+  return { element, node }
+})
+
 const textEditorStyle = computed(() => {
   const editor = textEditor.value
   if (!editor) return {}
-  const isMindMapEditor = editor.key?.includes('::') ?? false
-  const padding = isMindMapEditor ? Math.max(8, Math.min(14, editor.fontSize * 0.68)) : 4
+
+  const mindMap = editingMindMapInfo.value
+  if (mindMap) {
+    // In-place node editing: the textarea covers the node exactly and
+    // copies its visual style (fill, radius, font, centering), so typing
+    // feels like editing the node itself rather than a floating box.
+    const { element, node } = mindMap
+    const s = getMindMapScale(element)
+    const isRoot = node.id === 'root'
+    const fontSize = isRoot ? element.fontSize + 1 : element.fontSize
+    const lineHeight = fontSize * 1.2
+    let lineCount = 1
+    const ctx = canvasRef.value?.getContext('2d')
+    if (ctx) {
+      ctx.save()
+      ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+      lineCount = Math.max(1, wrapTextLines(ctx, editor.text, Math.max(1, node.width - 22 * s)).length)
+      ctx.restore()
+    }
+    const padTop = Math.max(0, (editor.height - lineCount * lineHeight) / 2)
+    return {
+      left: `${offsetX.value + editor.x * scale.value}px`,
+      top: `${offsetY.value + editor.y * scale.value}px`,
+      width: `${Math.max(1, editor.width * scale.value)}px`,
+      height: `${Math.max(1, editor.height * scale.value)}px`,
+      fontSize: `${fontSize * scale.value}px`,
+      lineHeight: '1.2',
+      color: isRoot ? '#ffffff' : '#202124',
+      backgroundColor: node.color || (isRoot ? '#202124' : '#ffffff'),
+      borderRadius: `${(isRoot ? 18 : 8) * s * scale.value}px`,
+      fontFamily: TEXT_FONT_FAMILY,
+      fontWeight: isRoot ? '700' : '600',
+      textAlign: 'center' as const,
+      padding: `${padTop * scale.value}px ${11 * s * scale.value}px`,
+      boxSizing: 'border-box' as const,
+      transform: `rotate(${editor.rotation}deg)`,
+      // Positioned at the node's rotated top-left, so rotation pivots there.
+      transformOrigin: 'top left',
+    }
+  }
+
   return {
-    left: `${offsetX.value + (editor.x + (isMindMapEditor ? padding : 0)) * scale.value}px`,
-    top: `${offsetY.value + (editor.y + (isMindMapEditor ? padding : 0)) * scale.value}px`,
-    width: `${Math.max(1, (editor.width - (isMindMapEditor ? padding * 2 : 0)) * scale.value)}px`,
-    height: `${Math.max(1, (editor.height - (isMindMapEditor ? padding * 2 : 0)) * scale.value)}px`,
+    left: `${offsetX.value + editor.x * scale.value}px`,
+    top: `${offsetY.value + editor.y * scale.value}px`,
+    width: `${Math.max(1, editor.width * scale.value)}px`,
+    height: `${Math.max(1, editor.height * scale.value)}px`,
     fontSize: `${editor.fontSize * scale.value}px`,
     color: editor.color,
     fontFamily: TEXT_FONT_FAMILY,
@@ -570,10 +621,8 @@ const textEditorStyle = computed(() => {
     fontStyle: editor.italic ? 'italic' : 'normal',
     textAlign: editor.align,
     transform: `rotate(${editor.rotation}deg)`,
-    // Mind-map editors are positioned at the node's rotated top-left, so
-    // the rotation must pivot there; plain text rotates around its center
-    // to match the canvas renderer.
-    transformOrigin: isMindMapEditor ? 'top left' : 'center',
+    // Plain text rotates around its center to match the canvas renderer.
+    transformOrigin: 'center',
   }
 })
 const textToolbarStyle = computed(() => {
@@ -1707,11 +1756,16 @@ function beginTextEdit(element: TextStroke) {
   })
 }
 
+// Pre-edit snapshot of the mind map being inline-edited. Typing mutates the
+// node live (so it grows in place); Escape / empty commit restores this.
+let mindMapEditState: { element: CanvasStroke; before: CanvasStroke } | null = null
+
 function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.value || 'root') {
   if (element.type !== 'mindmap') return
   const node = element.nodes.find(item => item.id === nodeId) || element.nodes.find(item => item.id === 'root') || element.nodes[0]
   if (!node) return
   selectedMindMapNodeId.value = node.id
+  mindMapEditState = { element, before: cloneElement(element) }
   const world = mindMapLocalToWorld(element, { x: node.x, y: node.y })
   beginTextEditState({
     key: `${elementKey(element)}::${node.id}`,
@@ -1728,6 +1782,64 @@ function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.
     italic: false,
   })
   requestRender()
+}
+
+function onTextEditorInputWrapped(e: Event) {
+  onTextEditorInput(e)
+  syncMindMapEditorBox()
+}
+
+/**
+ * Live in-place editing: mirror the draft into the node, let it grow (and
+ * the layout shift) as you type, and keep the textarea glued to the node's
+ * box. The pre-edit snapshot makes this safely cancellable.
+ */
+function syncMindMapEditorBox() {
+  const editor = textEditor.value
+  const info = editingMindMapInfo.value
+  if (!editor || !info) return
+  const { element, node } = info
+  const s = getMindMapScale(element)
+  node.text = editor.text
+  const ctx = canvasRef.value?.getContext('2d')
+  if (ctx) {
+    const isRoot = node.id === 'root'
+    const fontSize = isRoot ? element.fontSize + 1 : element.fontSize
+    ctx.save()
+    ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+    const widest = editor.text.split(/\r?\n/).reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0)
+    ctx.restore()
+    node.width = Math.max(node.width, Math.min(260 * s, widest + 26 * s))
+  }
+  fitMindMapNodeHeight(element, node)
+  layoutMindMap(element)
+  const world = mindMapLocalToWorld(element, { x: node.x, y: node.y })
+  editor.x = world.x
+  editor.y = world.y
+  editor.width = node.width
+  editor.height = node.height
+  notifyStrokesChanged()
+}
+
+/** Escape or empty commit: restore the pre-edit snapshot. */
+function onTextEditorCancelled() {
+  const state = mindMapEditState
+  mindMapEditState = null
+  if (!state) return
+  const element = state.element
+  if (!allStrokes.value.includes(element)) return
+  Object.assign(element, cloneElement(state.before), {
+    id: element.id,
+    localId: element.localId,
+    created_at: element.created_at,
+    page: element.page,
+    pending: element.pending,
+    failed: element.failed,
+    retryCount: element.retryCount,
+    retryTimer: element.retryTimer,
+    transformRetryTimer: element.transformRetryTimer,
+  })
+  notifyStrokesChanged()
 }
 
 function editSelectedMindMapNode() {
@@ -1804,17 +1916,22 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
     if (element?.type === 'mindmap') {
       const node = element.nodes.find(item => item.id === nodeId)
       if (node) {
-        if (node.text !== commit.text) {
-          const before = snapshotMindMap(element)
-          const s = getMindMapScale(element)
-          node.text = commit.text
-          node.width = Math.max(node.width, Math.min(260 * s, commit.width))
-          fitMindMapNodeHeight(element, node)
-          layoutMindMap(element)
-          history.pushMutation(element, before)
-          notifyStrokesChanged()
+        const editState = mindMapEditState
+        mindMapEditState = null
+        node.text = commit.text
+        fitMindMapNodeHeight(element, node)
+        layoutMindMap(element)
+        if (editState?.element === element) {
+          const changed = JSON.stringify(persistableStroke(element)) !== JSON.stringify(persistableStroke(editState.before))
+          if (changed) {
+            history.pushMutation(element, editState.before)
+            void persist.saveElementTransform(element)
+          }
+        } else {
+          // No snapshot (defensive): persist without an undo entry.
           void persist.saveElementTransform(element)
         }
+        notifyStrokesChanged()
         setSelectedElements([element])
         selectedMindMapNodeId.value = node.id
       }
