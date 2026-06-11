@@ -216,7 +216,25 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
       nodeScale = Math.round(rawScale * 1000) / 1000;
     }
 
-    const nodes: Array<{ id: string; text: string; x: number; y: number; width: number; height: number; color?: string; branch?: "left" | "right"; collapsed?: boolean; manualPosition?: boolean }> = [];
+    const nodes: Array<{
+      id: string;
+      text: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      color?: string;
+      branch?: "left" | "right";
+      collapsed?: boolean;
+      manualPosition?: boolean;
+      fillColor?: string;
+      borderColor?: string;
+      textColor?: string;
+      bold?: boolean;
+      italic?: boolean;
+    }> = [];
+    const hexColor = (value: unknown): string | undefined =>
+      typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value : undefined;
     const nodeIds = new Set<string>();
     for (const rawNode of stroke.nodes) {
       const id = typeof rawNode?.id === "string" ? rawNode.id.trim().slice(0, 40) : "";
@@ -248,10 +266,16 @@ export function normalizeStrokeData(raw: string): StrokeValidationResult {
         y: Math.round(nodeY * 100) / 100,
         width: Math.round(nodeWidth * 100) / 100,
         height: Math.round(nodeHeight * 100) / 100,
-        color: typeof rawNode?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(rawNode.color) ? rawNode.color : undefined,
+        color: hexColor(rawNode?.color),
         branch: rawNode?.branch === "left" ? "left" : rawNode?.branch === "right" ? "right" : undefined,
         collapsed: rawNode?.collapsed === true,
         manualPosition: rawNode?.manualPosition === true,
+        // User style overrides; tri-state bold (false ≠ unset default weight).
+        fillColor: hexColor(rawNode?.fillColor),
+        borderColor: hexColor(rawNode?.borderColor),
+        textColor: hexColor(rawNode?.textColor),
+        bold: typeof rawNode?.bold === "boolean" ? rawNode.bold : undefined,
+        italic: rawNode?.italic === true ? true : undefined,
       });
     }
 

@@ -80,11 +80,18 @@ export interface MindMapNodeData {
   y: number
   width: number
   height: number
+  /** Auto branch/theme color, rewritten on every layout. User overrides live in `fillColor`. */
   color?: string
   branch?: 'left' | 'right'
   collapsed?: boolean
   /** @deprecated Free-position drag was removed; kept on the wire for old rows. */
   manualPosition?: boolean
+  /** User style overrides; unset fields fall back to the branch/theme defaults. */
+  fillColor?: string
+  borderColor?: string
+  textColor?: string
+  bold?: boolean
+  italic?: boolean
 }
 
 export interface MindMapEdgeData {

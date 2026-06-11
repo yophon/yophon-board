@@ -6,7 +6,7 @@ import {
   getTextPadding,
   wrapTextLines,
 } from './textLayout'
-import { countMindMapDescendants, getMindMapChildren, getMindMapScale, getVisibleMindMapNodeIds } from './mindmap'
+import { countMindMapDescendants, getMindMapChildren, getMindMapNodeStyle, getMindMapScale, getVisibleMindMapNodeIds } from './mindmap'
 import type { StrokeData } from './types'
 
 interface DrawOptions {
@@ -288,24 +288,25 @@ function drawMindMapNode(
   s: number,
 ) {
   const isRoot = node.id === 'root'
+  const style = getMindMapNodeStyle(node)
   const radius = (isRoot ? 18 : 8) * s
   ctx.shadowColor = 'rgba(32,33,36,.12)'
   ctx.shadowBlur = (isRoot ? 12 : 7) * s
   ctx.shadowOffsetY = (isRoot ? 4 : 2) * s
-  ctx.fillStyle = node.color || (isRoot ? '#202124' : '#ffffff')
+  ctx.fillStyle = style.fill
   roundRect(ctx, node.x, node.y, node.width, node.height, radius)
   ctx.fill()
   ctx.shadowColor = 'transparent'
   ctx.shadowBlur = 0
   ctx.shadowOffsetY = 0
-  ctx.strokeStyle = isRoot ? '#202124' : (node.branch === 'left' ? 'rgba(91,141,239,.35)' : 'rgba(55,168,107,.34)')
-  ctx.lineWidth = 1.2 * s
-  if (!isRoot) ctx.stroke()
+  ctx.strokeStyle = style.border
+  ctx.lineWidth = (style.customBorder ? 1.8 : 1.2) * s
+  if (style.hasBorder) ctx.stroke()
 
   if (mindmap.editingNodeId !== node.id) {
     const fontSize = isRoot ? mindmap.fontSize + 1 : mindmap.fontSize
-    ctx.fillStyle = isRoot ? '#ffffff' : '#202124'
-    ctx.font = `${isRoot ? 700 : 600} ${fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
+    ctx.fillStyle = style.text
+    ctx.font = `${style.italic ? 'italic ' : ''}${style.fontWeight} ${fontSize}px "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     const lines = wrapTextLines(ctx, node.text, Math.max(1, node.width - 22 * s))

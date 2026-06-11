@@ -6,6 +6,7 @@ import {
   deleteMindMapNodeById,
   getMindMapBadgeNodeId,
   getMindMapChildren,
+  getMindMapNodeStyle,
   getMindMapScale,
   layoutMindMap,
   normalizeMindMap,
@@ -95,6 +96,85 @@ describe('normalizeMindMap', () => {
     element.nodes[1].manualPosition = true
     normalizeMindMap(element)
     expect(element.nodes.every(node => !node.manualPosition)).toBe(true)
+  })
+})
+
+describe('layoutMindMap root anchoring', () => {
+  /** Root center in world coordinates (tests use rotation 0). */
+  function rootWorldCenter(element: MindMapElementData) {
+    const root = element.nodes.find(n => n.id === 'root')!
+    return { x: element.x + root.x + root.width / 2, y: element.y + root.y + root.height / 2 }
+  }
+
+  test('collapsing and expanding keeps the root node world position', () => {
+    const element = makeTree()
+    const before = rootWorldCenter(element)
+    toggleMindMapNodeCollapsed(element, 'a')
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+    toggleMindMapNodeCollapsed(element, 'a')
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+  })
+
+  test('reattaching a node keeps the root node world position', () => {
+    const element = makeTree()
+    const before = rootWorldCenter(element)
+    expect(reattachMindMapNode(element, 'b', 'a', 1, 'right')).toBe(true)
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+    // Flipping a whole subtree across the root grows the left side.
+    expect(reattachMindMapNode(element, 'a', 'root', 0, 'left')).toBe(true)
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+  })
+
+  test('adding and deleting nodes keeps the root node world position', () => {
+    const element = makeTree()
+    const before = rootWorldCenter(element)
+    const added = addMindMapChildNode(element, 'c')
+    expect(added).not.toBeNull()
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+    deleteMindMapNodeById(element, 'a')
+    expect(rootWorldCenter(element).x).toBeCloseTo(before.x)
+    expect(rootWorldCenter(element).y).toBeCloseTo(before.y)
+  })
+})
+
+describe('getMindMapNodeStyle', () => {
+  test('falls back to theme defaults', () => {
+    const element = makeTree()
+    layoutMindMap(element)
+    const root = element.nodes.find(n => n.id === 'root')!
+    const rootStyle = getMindMapNodeStyle(root)
+    expect(rootStyle.fill).toBe('#202124')
+    expect(rootStyle.text).toBe('#ffffff')
+    expect(rootStyle.fontWeight).toBe(700)
+    expect(rootStyle.hasBorder).toBe(false)
+    const child = element.nodes.find(n => n.id === 'a')!
+    const childStyle = getMindMapNodeStyle(child)
+    expect(childStyle.fontWeight).toBe(600)
+    expect(childStyle.hasBorder).toBe(true)
+    expect(childStyle.italic).toBe(false)
+  })
+
+  test('honors user overrides and survives re-layout', () => {
+    const element = makeTree()
+    const node = element.nodes.find(n => n.id === 'a')!
+    node.fillColor = '#ffe0e0'
+    node.borderColor = '#ff0000'
+    node.textColor = '#003366'
+    node.bold = false
+    node.italic = true
+    layoutMindMap(element)
+    const style = getMindMapNodeStyle(element.nodes.find(n => n.id === 'a')!)
+    expect(style.fill).toBe('#ffe0e0')
+    expect(style.border).toBe('#ff0000')
+    expect(style.customBorder).toBe(true)
+    expect(style.text).toBe('#003366')
+    expect(style.fontWeight).toBe(400)
+    expect(style.italic).toBe(true)
   })
 })
 

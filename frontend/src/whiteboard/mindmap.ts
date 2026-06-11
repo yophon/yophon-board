@@ -1,3 +1,4 @@
+import { degreesToRadians, rotatePoint } from './geometry'
 import type { MindMapEdgeData, MindMapElementData, MindMapNodeData, Point } from './types'
 
 export const MINDMAP_MAX_NODES = 80
@@ -22,6 +23,43 @@ const RIGHT_STROKE = '#37a86b'
 const DROP_RANGE = 150
 
 type BranchSide = 'left' | 'right'
+
+export interface MindMapNodeVisualStyle {
+  fill: string
+  /** Stroke color; `hasBorder` tells whether to stroke at all (root has none by default). */
+  border: string
+  hasBorder: boolean
+  /** True when the border color is a user override (drawn slightly thicker). */
+  customBorder: boolean
+  text: string
+  fontWeight: number
+  italic: boolean
+}
+
+/**
+ * Effective visual style of a node: user overrides first, then the
+ * branch/theme defaults the renderer always used.
+ */
+export function getMindMapNodeStyle(node: MindMapNodeData): MindMapNodeVisualStyle {
+  const isRoot = node.id === MINDMAP_ROOT_ID
+  const customBorder = !!node.borderColor
+  return {
+    fill: node.fillColor || node.color || (isRoot ? ROOT_COLOR : '#ffffff'),
+    border: node.borderColor || (node.branch === 'left' ? 'rgba(91,141,239,.35)' : 'rgba(55,168,107,.34)'),
+    hasBorder: customBorder || !isRoot,
+    customBorder,
+    text: node.textColor || (isRoot ? '#ffffff' : '#202124'),
+    fontWeight: node.bold === undefined ? (isRoot ? 700 : 600) : node.bold ? 700 : 400,
+    italic: node.italic === true,
+  }
+}
+
+/** Font shorthand for measuring/drawing a node's text. */
+export function getMindMapNodeFont(element: MindMapElementData, node: MindMapNodeData, fontFamily: string): string {
+  const style = getMindMapNodeStyle(node)
+  const fontSize = node.id === MINDMAP_ROOT_ID ? element.fontSize + 1 : element.fontSize
+  return `${style.italic ? 'italic ' : ''}${style.fontWeight} ${fontSize}px ${fontFamily}`
+}
 
 export interface MindMapDropTarget {
   parentId: string
@@ -353,7 +391,38 @@ export function normalizeMindMap(element: MindMapElementData) {
   layoutMindMap(element)
 }
 
+/**
+ * Re-layout, then translate the element so the ROOT NODE keeps its world
+ * position. Without this every structural change (reattach, collapse,
+ * add/delete, text growth) re-flows from the element's fixed top-left and
+ * the whole map visually jumps.
+ */
 export function layoutMindMap(element: MindMapElementData) {
+  const anchor = getMindMapRootWorldCenter(element)
+  layoutMindMapCore(element)
+  if (!anchor) return
+  const moved = getMindMapRootWorldCenter(element)
+  if (!moved) return
+  element.x += anchor.x - moved.x
+  element.y += anchor.y - moved.y
+}
+
+/** World position of the root node's center, honoring element rotation. */
+function getMindMapRootWorldCenter(element: MindMapElementData): Point | null {
+  const root = getMindMapRoot(element)
+  if (!root) return null
+  const local = {
+    x: root.x + root.width / 2 - element.width / 2,
+    y: root.y + root.height / 2 - element.height / 2,
+  }
+  const rotated = rotatePoint(local, degreesToRadians(element.rotation ?? 0))
+  return {
+    x: element.x + element.width / 2 + rotated.x,
+    y: element.y + element.height / 2 + rotated.y,
+  }
+}
+
+function layoutMindMapCore(element: MindMapElementData) {
   const root = getMindMapRoot(element)
   if (!root) return
   const s = getMindMapScale(element)

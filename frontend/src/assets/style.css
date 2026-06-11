@@ -685,6 +685,53 @@ button { border: 0; background: none; cursor: pointer; }
   color: var(--color-danger);
 }
 
+.wb-mindmap-action.active {
+  background: var(--color-tag-bg);
+  opacity: 1;
+}
+
+.wb-mindmap-style-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  box-shadow: var(--shadow-md);
+  white-space: nowrap;
+}
+
+.wb-mindmap-style-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.wb-mindmap-style-label {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.wb-mindmap-style-reset {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-ink);
+  opacity: .68;
+}
+
+.wb-mindmap-style-reset:hover {
+  background: var(--color-hover);
+  opacity: 1;
+}
+
 .wb-minimap {
   position: absolute;
   right: 12px;

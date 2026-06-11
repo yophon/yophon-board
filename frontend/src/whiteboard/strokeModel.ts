@@ -267,6 +267,11 @@ export function parseStrokeRow(row: StrokeRow): CanvasStroke | null {
             branch: node.branch === 'left' ? 'left' as const : node.branch === 'right' ? 'right' as const : undefined,
             collapsed: node.collapsed === true,
             manualPosition: node.manualPosition === true,
+            fillColor: typeof node.fillColor === 'string' ? node.fillColor : undefined,
+            borderColor: typeof node.borderColor === 'string' ? node.borderColor : undefined,
+            textColor: typeof node.textColor === 'string' ? node.textColor : undefined,
+            bold: typeof node.bold === 'boolean' ? node.bold : undefined,
+            italic: node.italic === true ? true : undefined,
           }))
         : []
       const nodeIds = new Set(nodes.map(node => node.id))

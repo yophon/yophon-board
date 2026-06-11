@@ -125,9 +125,37 @@
         <svg v-if="selectedMindMapNode?.collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
         <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
       </button>
+      <button class="wb-mindmap-action" :class="{ active: mindMapStyleOpen }" @click="mindMapStyleOpen = !mindMapStyleOpen" title="节点样式（颜色 / 边框 / 文字）">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10c0 2.5-2 3-3.5 3H16a2 2 0 0 0-1.5 3.3c.4.5.5 1.2 0 1.7-.5.6-1.5 1-2.5 1Z"/><circle cx="7.5" cy="11.5" r="1"/><circle cx="11" cy="7.5" r="1"/><circle cx="16" cy="9" r="1"/></svg>
+      </button>
       <button class="wb-mindmap-action wb-mindmap-danger" :disabled="selectedMindMapNodeId === 'root'" @click="deleteMindMapNode" title="删除节点及子树（Delete，可撤销）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
       </button>
+      <div v-if="mindMapStyleOpen" class="wb-mindmap-style-panel">
+        <label class="wb-mindmap-style-row">
+          <span class="wb-mindmap-style-label">填充</span>
+          <span class="wb-text-color">
+            <input type="color" :value="mindMapNodeStyleValues.fill" @input="updateMindMapNodeStyle({ fillColor: ($event.target as HTMLInputElement).value }, false)" @change="commitMindMapNodeStyle" />
+          </span>
+        </label>
+        <label class="wb-mindmap-style-row">
+          <span class="wb-mindmap-style-label">边框</span>
+          <span class="wb-text-color">
+            <input type="color" :value="mindMapNodeStyleValues.border" @input="updateMindMapNodeStyle({ borderColor: ($event.target as HTMLInputElement).value }, false)" @change="commitMindMapNodeStyle" />
+          </span>
+        </label>
+        <label class="wb-mindmap-style-row">
+          <span class="wb-mindmap-style-label">文字</span>
+          <span class="wb-text-color">
+            <input type="color" :value="mindMapNodeStyleValues.text" @input="updateMindMapNodeStyle({ textColor: ($event.target as HTMLInputElement).value }, false)" @change="commitMindMapNodeStyle" />
+          </span>
+        </label>
+        <div class="wb-mindmap-style-row">
+          <button class="wb-text-style-btn" :class="{ active: mindMapNodeStyleValues.bold }" @click="toggleMindMapNodeStyle('bold')" title="粗体">B</button>
+          <button class="wb-text-style-btn wb-text-italic" :class="{ active: mindMapNodeStyleValues.italic }" @click="toggleMindMapNodeStyle('italic')" title="斜体">I</button>
+        </div>
+        <button class="wb-mindmap-style-reset" @click="resetMindMapNodeStyle">恢复默认</button>
+      </div>
     </div>
     <canvas
       ref="miniMapRef"
@@ -306,6 +334,8 @@ import {
   createDrawnixMindMapTemplate,
   getMindMapBadgeNodeId,
   getMindMapChildren,
+  getMindMapNodeFont,
+  getMindMapNodeStyle,
   getMindMapScale,
   deleteMindMapNodeById,
   getNearestMindMapNodeId,
@@ -577,13 +607,14 @@ const textEditorStyle = computed(() => {
     const { element, node } = mindMap
     const s = getMindMapScale(element)
     const isRoot = node.id === 'root'
+    const nodeStyle = getMindMapNodeStyle(node)
     const fontSize = isRoot ? element.fontSize + 1 : element.fontSize
     const lineHeight = fontSize * 1.2
     let lineCount = 1
     const ctx = canvasRef.value?.getContext('2d')
     if (ctx) {
       ctx.save()
-      ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+      ctx.font = getMindMapNodeFont(element, node, TEXT_FONT_FAMILY)
       lineCount = Math.max(1, wrapTextLines(ctx, editor.text, Math.max(1, node.width - 22 * s)).length)
       ctx.restore()
     }
@@ -595,11 +626,12 @@ const textEditorStyle = computed(() => {
       height: `${Math.max(1, editor.height * scale.value)}px`,
       fontSize: `${fontSize * scale.value}px`,
       lineHeight: '1.2',
-      color: isRoot ? '#ffffff' : '#202124',
-      backgroundColor: node.color || (isRoot ? '#202124' : '#ffffff'),
+      color: nodeStyle.text,
+      backgroundColor: nodeStyle.fill,
       borderRadius: `${(isRoot ? 18 : 8) * s * scale.value}px`,
       fontFamily: TEXT_FONT_FAMILY,
-      fontWeight: isRoot ? '700' : '600',
+      fontWeight: String(nodeStyle.fontWeight),
+      fontStyle: nodeStyle.italic ? 'italic' as const : 'normal' as const,
       textAlign: 'center' as const,
       padding: `${padTop * scale.value}px ${11 * s * scale.value}px`,
       boxSizing: 'border-box' as const,
@@ -750,12 +782,64 @@ function fitMindMapNodeHeight(element: MindMapElementData & CanvasStroke, node: 
   let lineCount = 1
   if (ctx) {
     ctx.save()
-    ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+    ctx.font = getMindMapNodeFont(element, node, TEXT_FONT_FAMILY)
     lineCount = Math.max(1, wrapTextLines(ctx, node.text, Math.max(1, node.width - 22 * s)).length)
     ctx.restore()
   }
   const minHeight = (isRoot ? 62 : 38) * s
   node.height = Math.max(minHeight, Math.ceil(lineCount * fontSize * 1.2 + 16 * s))
+}
+
+// —— mind-map node style overrides ——
+
+const mindMapStyleOpen = ref(false)
+/** Snapshot for one style-editing session so a color drag yields a single undo entry. */
+let mindMapStyleSession: { element: CanvasStroke; before: CanvasStroke } | null = null
+
+type MindMapNodeStylePatch = Partial<Pick<MindMapNodeData, 'fillColor' | 'borderColor' | 'textColor' | 'bold' | 'italic'>>
+
+/** Hex values for the pickers: override first, else the theme default. */
+const mindMapNodeStyleValues = computed(() => {
+  const node = selectedMindMapNode.value
+  const isRoot = node?.id === 'root'
+  return {
+    fill: node?.fillColor || node?.color || (isRoot ? '#202124' : '#ffffff'),
+    border: node?.borderColor || (node?.branch === 'left' ? '#5b8def' : '#37a86b'),
+    text: node?.textColor || (isRoot ? '#ffffff' : '#202124'),
+    bold: node ? node.bold ?? true : false,
+    italic: node?.italic === true,
+  }
+})
+
+function updateMindMapNodeStyle(patch: MindMapNodeStylePatch, commit = true) {
+  const element = selectedMindMapElement.value
+  const node = selectedMindMapNode.value
+  if (!element || !node) return
+  if (!mindMapStyleSession || mindMapStyleSession.element !== element) {
+    mindMapStyleSession = { element, before: snapshotMindMap(element) }
+  }
+  Object.assign(node, patch)
+  notifyStrokesChanged()
+  if (commit) commitMindMapNodeStyle()
+}
+
+/** Close a style session: one undo entry + one save when something changed. */
+function commitMindMapNodeStyle() {
+  const session = mindMapStyleSession
+  mindMapStyleSession = null
+  if (!session || !allStrokes.value.includes(session.element)) return
+  if (JSON.stringify(persistableStroke(session.element)) === JSON.stringify(persistableStroke(session.before))) return
+  history.pushMutation(session.element, session.before)
+  void persist.saveElementTransform(session.element)
+}
+
+function toggleMindMapNodeStyle(key: 'bold' | 'italic') {
+  if (key === 'bold') updateMindMapNodeStyle({ bold: !mindMapNodeStyleValues.value.bold })
+  else updateMindMapNodeStyle({ italic: !mindMapNodeStyleValues.value.italic })
+}
+
+function resetMindMapNodeStyle() {
+  updateMindMapNodeStyle({ fillColor: undefined, borderColor: undefined, textColor: undefined, bold: undefined, italic: undefined })
 }
 
 // —— tools ——
@@ -1419,7 +1503,14 @@ function onPointerDown(e: PointerEvent) {
   }
 
   const hit = currentTool.value === 'select' ? selection.hitTest(worldPoint) : null
-  if (hit) {
+  // A mind map's bounding box is mostly whitespace: a plain click inside it
+  // that missed every node/badge (checked above) counts as clicking empty
+  // space, so it falls through to box select and deselects. Moving the map
+  // is done by dragging the root node; resize/rotate handles (mode !==
+  // 'move') and multi-element group moves keep working.
+  const blankMindMapClick = !!hit && hit.element.type === 'mindmap' && hit.mode === 'move'
+    && selectedElementKeys.value.length <= 1
+  if (hit && !blankMindMapClick) {
     e.preventDefault()
     if (!isElementSelected(hit.element)) setSelectedElements([hit.element])
     if (hit.element.type !== 'mindmap') selectedMindMapNodeId.value = null
@@ -1585,15 +1676,18 @@ function onCanvasDoubleClick(e: MouseEvent) {
   const hit = selection.hitTest(worldPoint)
   if (!hit) return
 
-  setSelectedElements([hit.element])
-  if (hit.element.type === 'text') {
-    beginTextEdit(hit.element)
+  if (hit.element.type === 'mindmap') {
+    // Only an actual node opens the inline editor; double-clicking the
+    // map's whitespace stays a no-op so it matches single-click deselect.
+    const nodeHit = hitTestMindMapNode(worldPoint, hit.element)
+    if (!nodeHit) return
+    setSelectedElements([hit.element])
+    beginMindMapEdit(hit.element, nodeHit.node.id)
     return
   }
-  if (hit.element.type === 'mindmap') {
-    const nodeHit = hitTestMindMapNode(worldPoint, hit.element)
-    beginMindMapEdit(hit.element, nodeHit?.node.id)
-  }
+
+  setSelectedElements([hit.element])
+  if (hit.element.type === 'text') beginTextEdit(hit.element)
 }
 
 // —— eraser (delete / cut modes) ——
@@ -1767,6 +1861,7 @@ function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.
   selectedMindMapNodeId.value = node.id
   mindMapEditState = { element, before: cloneElement(element) }
   const world = mindMapLocalToWorld(element, { x: node.x, y: node.y })
+  const nodeStyle = getMindMapNodeStyle(node)
   beginTextEditState({
     key: `${elementKey(element)}::${node.id}`,
     text: node.text,
@@ -1776,10 +1871,10 @@ function beginMindMapEdit(element: CanvasStroke, nodeId = selectedMindMapNodeId.
     height: node.height,
     rotation: element.rotation ?? 0,
     fontSize: element.fontSize,
-    color: node.id === 'root' ? '#ffffff' : '#202124',
+    color: nodeStyle.text,
     align: 'center',
-    bold: node.id === 'root',
-    italic: false,
+    bold: nodeStyle.fontWeight >= 700,
+    italic: nodeStyle.italic,
   })
   requestRender()
 }
@@ -1803,10 +1898,8 @@ function syncMindMapEditorBox() {
   node.text = editor.text
   const ctx = canvasRef.value?.getContext('2d')
   if (ctx) {
-    const isRoot = node.id === 'root'
-    const fontSize = isRoot ? element.fontSize + 1 : element.fontSize
     ctx.save()
-    ctx.font = `${isRoot ? 700 : 600} ${fontSize}px ${TEXT_FONT_FAMILY}`
+    ctx.font = getMindMapNodeFont(element, node, TEXT_FONT_FAMILY)
     const widest = editor.text.split(/\r?\n/).reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0)
     ctx.restore()
     node.width = Math.max(node.width, Math.min(260 * s, widest + 26 * s))
@@ -1932,8 +2025,10 @@ async function applyTextEditorCommit(commit: TextEditorCommit) {
           void persist.saveElementTransform(element)
         }
         notifyStrokesChanged()
-        setSelectedElements([element])
-        selectedMindMapNodeId.value = node.id
+        // Don't re-assert the selection here: when this commit was triggered
+        // by clicking empty space or another node (textarea blur), pointerdown
+        // already moved/cleared the selection and stomping it back made
+        // deselect-by-click and node switching impossible.
       }
     }
     return
