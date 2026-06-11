@@ -692,7 +692,9 @@ button { border: 0; background: none; cursor: pointer; }
 
 .wb-mindmap-style-panel {
   position: absolute;
-  top: calc(100% + 6px);
+  /* Opens away from the node: upward by default (toolbar sits above the
+     node), downward when the toolbar is flipped below it. */
+  bottom: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -704,6 +706,11 @@ button { border: 0; background: none; cursor: pointer; }
   background: var(--color-card);
   box-shadow: var(--shadow-md);
   white-space: nowrap;
+}
+
+.wb-mindmap-style-panel.below {
+  bottom: auto;
+  top: calc(100% + 6px);
 }
 
 .wb-mindmap-style-row {

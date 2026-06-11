@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   addMindMapChildNode,
+  addMindMapSiblingNode,
   countMindMapDescendants,
   createDrawnixMindMapTemplate,
   deleteMindMapNodeById,
@@ -175,6 +176,28 @@ describe('getMindMapNodeStyle', () => {
     expect(style.text).toBe('#003366')
     expect(style.fontWeight).toBe(400)
     expect(style.italic).toBe(true)
+  })
+})
+
+describe('branch assignment for new nodes', () => {
+  test('new root child always starts on the right (no auto-balancing)', () => {
+    // makeTree has 2 right children vs 1 left; balancing would pick left.
+    const element = makeTree()
+    const added = addMindMapChildNode(element, 'root')
+    expect(added?.branch).toBe('right')
+  })
+
+  test('sibling of a root child inherits that child\'s branch', () => {
+    const right = addMindMapSiblingNode(makeTree(), 'a')
+    expect(right?.branch).toBe('right')
+    const left = addMindMapSiblingNode(makeTree(), 'c')
+    expect(left?.branch).toBe('left')
+  })
+
+  test('child of a non-root node keeps the parent branch', () => {
+    const element = makeTree()
+    const added = addMindMapChildNode(element, 'c')
+    expect(added?.branch).toBe('left')
   })
 })
 

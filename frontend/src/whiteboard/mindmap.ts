@@ -180,11 +180,11 @@ export function createMindMapNodeId(element: MindMapElementData): string {
   return id
 }
 
-export function addMindMapChildNode(element: MindMapElementData, parentId: string, text = '新节点'): MindMapNodeData | null {
+export function addMindMapChildNode(element: MindMapElementData, parentId: string, text = '新节点', branch?: BranchSide): MindMapNodeData | null {
   if (element.nodes.length >= MINDMAP_MAX_NODES) return null
   const parent = element.nodes.find(node => node.id === parentId)
   if (!parent) return null
-  const branch = resolveNodeBranch(element, parent)
+  branch = branch || resolveNodeBranch(parent)
   const node = createMindMapNode(createMindMapNodeId(element), text, branch, false, getMindMapScale(element))
   element.nodes.push(node)
   element.edges.push(createMindMapEdge(parent.id, node.id, branch))
@@ -196,7 +196,10 @@ export function addMindMapChildNode(element: MindMapElementData, parentId: strin
 export function addMindMapSiblingNode(element: MindMapElementData, nodeId: string, text = '新节点'): MindMapNodeData | null {
   if (nodeId === MINDMAP_ROOT_ID) return null
   const parentId = findMindMapParentId(element, nodeId) || MINDMAP_ROOT_ID
-  const sibling = addMindMapChildNode(element, parentId, text)
+  // A sibling inherits the reference node's branch, so adding next to a
+  // right-side root child never lands the new node on the left.
+  const reference = element.nodes.find(node => node.id === nodeId)
+  const sibling = addMindMapChildNode(element, parentId, text, reference?.branch || 'right')
   const targetIndex = element.edges.findIndex(edge => edge.to === nodeId)
   const siblingIndex = sibling ? element.edges.findIndex(edge => edge.to === sibling.id) : -1
   if (targetIndex >= 0 && siblingIndex >= 0) {
@@ -525,12 +528,13 @@ function getMindMapRoot(element: MindMapElementData): MindMapNodeData | null {
   return element.nodes.find(node => node.id === MINDMAP_ROOT_ID) || element.nodes[0] || null
 }
 
-function resolveNodeBranch(element: MindMapElementData, node: MindMapNodeData): BranchSide {
+/**
+ * New root children always start on the right (no auto-balancing — the
+ * user moves nodes left by dragging); other nodes keep their own branch.
+ */
+function resolveNodeBranch(node: MindMapNodeData): BranchSide {
   if (node.id !== MINDMAP_ROOT_ID) return node.branch || 'right'
-  const rootChildren = getMindMapChildren(element, node.id)
-  const left = rootChildren.filter(child => child.branch === 'left').length
-  const right = rootChildren.length - left
-  return right <= left ? 'right' : 'left'
+  return 'right'
 }
 
 function getSiblingNodes(element: MindMapElementData, nodeId: string): MindMapNodeData[] {

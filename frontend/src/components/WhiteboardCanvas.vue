@@ -131,7 +131,7 @@
       <button class="wb-mindmap-action wb-mindmap-danger" :disabled="selectedMindMapNodeId === 'root'" @click="deleteMindMapNode" title="删除节点及子树（Delete，可撤销）">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
       </button>
-      <div v-if="mindMapStyleOpen" class="wb-mindmap-style-panel">
+      <div v-if="mindMapStyleOpen" class="wb-mindmap-style-panel" :class="{ below: mindMapToolbarPlacement?.below }">
         <label class="wb-mindmap-style-row">
           <span class="wb-mindmap-style-label">填充</span>
           <span class="wb-text-color">
@@ -712,14 +712,35 @@ const selectedMindMapNodeHasChildren = computed(() => {
   return !!element && !!node && getMindMapChildren(element, node.id).length > 0
 })
 
-const mindMapToolbarStyle = computed(() => {
+/**
+ * Toolbar goes above the selected node; when the node is too close to the
+ * top of the screen (so the toolbar — plus the style panel, which opens
+ * upward — wouldn't fit) it flips below the node instead. Either way it
+ * never covers the node itself.
+ */
+const mindMapToolbarPlacement = computed(() => {
   const element = selectedMindMapElement.value
   const node = selectedMindMapNode.value
-  if (!element || !node) return {}
+  if (!element || !node) return null
   const topCenter = mindMapLocalToWorld(element, { x: node.x + node.width / 2, y: node.y })
+  const bottomCenter = mindMapLocalToWorld(element, { x: node.x + node.width / 2, y: node.y + node.height })
+  const yTop = offsetY.value + Math.min(topCenter.y, bottomCenter.y) * scale.value
+  const yBottom = offsetY.value + Math.max(topCenter.y, bottomCenter.y) * scale.value
+  const spaceNeeded = 46 + (mindMapStyleOpen.value ? 46 : 0)
+  const below = yTop - spaceNeeded < 8
   return {
-    left: `${offsetX.value + topCenter.x * scale.value}px`,
-    top: `${Math.max(8, offsetY.value + topCenter.y * scale.value - 46)}px`,
+    x: offsetX.value + (topCenter.x + bottomCenter.x) / 2 * scale.value,
+    y: below ? yBottom + 8 : yTop - 46,
+    below,
+  }
+})
+
+const mindMapToolbarStyle = computed(() => {
+  const placement = mindMapToolbarPlacement.value
+  if (!placement) return {}
+  return {
+    left: `${placement.x}px`,
+    top: `${placement.y}px`,
     transform: 'translateX(-50%)',
   }
 })
